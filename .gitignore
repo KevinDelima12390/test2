@@ -1,0 +1,26 @@
+# Python virtual environments
+venv/
+*/venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Model / large binary files
+*.dat
+*.pkl
+*.pth
+*.pt
+*.h5
+
+# Torch libs
+*.dylib
+*.so
+*.dll
+
+# IDE files
+.vscode/
+.idea/
+
+# Mac files
+.DS_Store
