@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+SQLAlchemy
+passlib[bcrypt]
+python-jose[cryptography]
+face_recognition
+websockets
+python-multipart
+aiofiles
+requests

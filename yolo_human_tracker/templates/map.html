@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Drone Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script>
+    const map = L.map("map").setView([3.1275, 101.6579], 15);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "© OpenStreetMap contributors",
+    }).addTo(map);
+    const droneMarker = L.marker([3.1275, 101.6579]).addTo(map);
+    let waypointMarkers = [];
+    let flightPath = L.polyline([], {color: 'blue'}).addTo(map);
+
+    async function updatePosition() {
+      const res = await fetch("/coords");
+      const data = await res.json();
+      console.log("Received data from /coords:", data);
+
+      // Update drone position
+      droneMarker.setLatLng([data.coords.lat, data.coords.lon]);
+      map.panTo([data.coords.lat, data.coords.lon]);
+
+      // Clear old waypoints and path
+      waypointMarkers.forEach(marker => map.removeLayer(marker));
+      waypointMarkers = [];
+      flightPath.setLatLngs([]); // This clears the polyline
+      console.log("Cleared old waypoints and flight path.");
+
+      // Add new waypoints and draw path
+      if (data.waypoints && data.waypoints.length > 0) {
+        console.log("Waypoints received:", data.waypoints);
+        const latlngs = [];
+        data.waypoints.forEach(wp => {
+          const marker = L.marker([wp.lat, wp.lon]).addTo(map);
+          waypointMarkers.push(marker);
+          latlngs.push([wp.lat, wp.lon]);
+        });
+        flightPath.setLatLngs(latlngs);
+        console.log("Flight path LatLngs set to:", flightPath.getLatLngs());
+      }
+    }
+    setInterval(updatePosition, 1000);
+  </script>
+</body>
+</html>

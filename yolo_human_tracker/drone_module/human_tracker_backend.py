@@ -51,7 +51,7 @@ class HumanTrackerBackend:
         self.load_known_faces()  # Load known faces from disk on startup
 
         # State variables for toggling features
-        self.face_recognition_enabled = True
+        self.face_recognition_enabled = False
         self.low_light_enhancement_enabled = False
         self.paused = False  # Controls whether frame processing is paused
 
@@ -66,6 +66,51 @@ class HumanTrackerBackend:
         self.FONT_SCALE = 0.6
         self.FONT_THICKNESS = 2
 
+    def import_ibis_faces(self, users_data):
+        """
+        Imports user face data from the IBIS Database System into the known faces database.
+        Args:
+            users_data (list): A list of dictionaries, each containing 'user_id', 'name',
+                               'face_encoding' (pickled bytes), and 'image_path'.
+        """
+        for user_data in users_data:
+            user_id = user_data.get('user_id')
+            name = user_data.get('name')
+            face_encoding_bytes = user_data.get('face_encoding')
+            image_path = user_data.get('image_path')
+
+            if user_id and name and face_encoding_bytes:
+                try:
+                    encoding = pickle.loads(face_encoding_bytes)
+                    # Explicitly check if encoding is not None and not empty
+                    if encoding is not None and len(encoding) > 0:
+                        if user_id not in self.known_faces_db:
+                            # Add new user
+                            self.known_faces_db[user_id] = {
+                                'encodings': deque([encoding], maxlen=self.MAX_FACE_IMAGES_PER_PERSON),
+                                'image': None, # We don't have the actual image data here, just path
+                                'name': name
+                            }
+                            print(f"Imported user {name} ({user_id}) from IBIS.")
+                        else:
+                            # Update existing user's encodings if necessary
+                            # Check if the encoding is distinct enough before adding
+                            is_distinct = True
+                            for existing_encoding in self.known_faces_db[user_id]['encodings']:
+                                if face_recognition.face_distance([existing_encoding], encoding)[0] < self.MIN_DISTINCT_FACE_DISTANCE:
+                                    is_distinct = False
+                                    break
+                            if is_distinct:
+                                self.known_faces_db[user_id]['encodings'].append(encoding)
+                                print(f"Updated encodings for user {name} ({user_id}) from IBIS.")
+                            else:
+                                print(f"Skipped adding duplicate encoding for user {name} ({user_id}).")
+                    else:
+                        print(f"Skipped importing user {name} ({user_id}) from IBIS: Face encoding is empty or None.")
+
+                except Exception as e:
+                    print(f"Error importing face data for {user_id} from IBIS: {e}")
+        self.save_known_faces() # Save changes after importing
 
     # --- Persistence Functions ---
     def load_known_faces(self):
@@ -312,7 +357,7 @@ class HumanTrackerBackend:
         """
         for person_id, obj_data in tracked_objects.items():
             x1, y1, x2, y2 = obj_data['box']
-            face_id_label = obj_data.get('face_id', 'Unknown')
+            face_id_label = obj_data.get('face_id')
             face_confidence = obj_data.get('face_confidence', 0.0)
             
             # Determine the person's name for display
@@ -324,7 +369,7 @@ class HumanTrackerBackend:
             if isinstance(face_id_label, str) and not face_id_label.startswith("Unidentified_") and face_id_label != "No Face Detected" and person_name != str(face_id_label):
                 label += f" C:{face_confidence:.2f}"
                 color = self.BOX_COLORS["recognized"]
-            elif face_id_label.startswith("Unidentified_"):
+            elif isinstance(face_id_label, str) and face_id_label.startswith("Unidentified_"):
                 label = f"P:{person_id} (Unidentified)"
                 color = self.BOX_COLORS["unidentified"]
             else:
@@ -463,3 +508,74 @@ class HumanTrackerBackend:
             return True, f"Successfully renamed '{old_name}' to '{new_name}'."
         
         return False, f"Could not find '{old_name}' to rename."
+
+    def get_current_unidentified_faces_for_saving(self):
+        """
+        Returns a list of currently detected faces that are not yet identified,
+        along with their encodings and confidence, for the GUI's 'Save New Face' feature.
+        """
+        faces_to_save = []
+        for person_id, obj_data in self.tracked_objects.items():
+            face_id = obj_data.get('face_id')
+            face_rect = obj_data.get('face_rect')
+            face_confidence = obj_data.get('face_confidence', 0.0)
+
+            # Only consider faces that are not yet identified by a proper name
+            if face_id and (face_id.startswith("Unidentified_") or face_id == "No Face Detected") and face_rect:
+                # We need the actual encoding from the frame, not just the ID
+                # This requires re-extracting the encoding or storing it in obj_data
+                # For simplicity, we'll assume the last known encoding for this person_id is available
+                # A more robust solution would involve storing the encoding in obj_data during process_frame
+                # For now, we'll use a placeholder or assume the GUI will re-extract if needed.
+                # Let's try to get the encoding from known_faces_db if it's an Unidentified_X
+                encoding = None
+                if face_id.startswith("Unidentified_") and face_id in self.known_faces_db:
+                    if self.known_faces_db[face_id]['encodings']:
+                        encoding = self.known_faces_db[face_id]['encodings'][-1] # Get the most recent encoding
+                
+                if encoding is not None:
+                    faces_to_save.append({
+                        'temp_id': person_id, # Use person_id as a temporary identifier for selection
+                        'encoding': encoding,
+                        'confidence': face_confidence,
+                        'face_rect': obj_data['box'] # Bounding box of the human, not just face
+                    })
+        return faces_to_save
+
+    def save_new_face(self, encoding, new_name):
+        """
+        Saves a new face encoding with a given name to the known faces database.
+        Args:
+            encoding (numpy.ndarray): The face encoding to save.
+            new_name (str): The name to assign to this face.
+        Returns:
+            tuple: (bool, str) - True if successful, False otherwise, along with a message.
+        """
+        if not new_name or new_name.isspace():
+            return False, "New name cannot be empty."
+
+        if new_name in self.known_faces_db:
+            return False, f"The name '{new_name}' already exists."
+
+        # Add the new face to the database
+        self.known_faces_db[new_name] = {
+            'encodings': deque([encoding], maxlen=self.MAX_FACE_IMAGES_PER_PERSON),
+            'image': None, # No image provided directly here
+            'name': new_name
+        }
+
+        # Update any currently tracked objects that might match this new face
+        for person_id, obj_data in self.tracked_objects.items():
+            if obj_data.get('face_id') and obj_data['face_id'].startswith("Unidentified_"):
+                # Check if this new encoding matches an unidentified person
+                if obj_data['face_id'] in self.known_faces_db:
+                    unidentified_encoding = self.known_faces_db[obj_data['face_id']]['encodings'][-1]
+                    if face_recognition.face_distance([unidentified_encoding], encoding)[0] < self.FACE_RECOGNITION_DISTANCE_THRESHOLD:
+                        obj_data['face_id'] = new_name
+                        obj_data['name'] = new_name
+                        # Remove the old Unidentified_X entry if it's now identified
+                        if obj_data['face_id'].startswith("Unidentified_"):
+                            del self.known_faces_db[obj_data['face_id']]
+
+        self.save_known_faces()
+        return True, f"Successfully saved new face as '{new_name}'."
