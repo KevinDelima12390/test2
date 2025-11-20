@@ -222,6 +222,33 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
+class UserWithFaceResponse(BaseModel):
+    user_id: str
+    name: str
+    face_encoding: bytes  # Keep as bytes, will be base64 encoded by FastAPI
+    image_path: str
+
+    class Config:
+        orm_mode = True
+
+@app.get("/users_with_faces", response_model=List[UserWithFaceResponse])
+async def get_users_with_faces(
+    db: Session = Depends(get_db),
+    # You might want to protect this endpoint, e.g., require a specific scope or user role
+    # For now, any authenticated user can access it.
+    current_user: User = Depends(get_current_user) 
+):
+    """
+    Retrieves all users with their face encodings.
+    This is intended for internal services like the Human Tracker.
+    """
+    users = db.query(User).all()
+    # Manually pickle the face_encoding since it's stored as bytes
+    for user in users:
+        if isinstance(user.face_encoding, np.ndarray):
+             user.face_encoding = pickle.dumps(user.face_encoding)
+    return users
+
 @app.get("/events/{user_id}", response_model=List[EmergencyEventResponse])
 async def get_emergency_events(
     user_id: str,

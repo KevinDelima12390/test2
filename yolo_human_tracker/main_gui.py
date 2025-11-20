@@ -7,9 +7,11 @@ import numpy as np
 import threading # Import threading
 import sqlite3 # Import sqlite3 for direct DB access
 import time # Import time for timestamping log messages
+import pickle
+import base64
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QTabWidget, QLabel, QPushButton, QInputDialog, 
-                             QGroupBox, QTextEdit) # Added QTextEdit
+                             QGroupBox, QTextEdit, QLineEdit, QComboBox) # Added QTextEdit
 from PyQt6.QtGui import QPalette, QColor, QImage, QPixmap
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QUrl, pyqtSlot, QTimer, QTimer
 from PyQt6.QtGui import QPixmap
@@ -19,11 +21,22 @@ import requests # Import requests for HTTP calls
 import sqlite3 # Import sqlite3 for direct DB access
 
 from drone_module.websocket_bridge import WebSocketBridge
+from drone_module.mavlink_communicator import MavlinkCommunicator
 from drone_module.gimbal_control import GimbalControl
+from drone_module.drone_telemetry import DroneTelemetryListener
 # from map_widget import MapWidget # Removed MapWidget import
 from drone_module.waypoint_deployer import WaypointDeployer
 from drone_module.human_tracker_backend import HumanTrackerBackend
-from drone_module.video_stream import VideoStreamThread, detect_available_cameras
+from drone_module.video_stream import VideoStreamThread
+
+# IBIS Configuration
+IBIS_CONFIG = {
+    "BASE_URL": "http://127.0.0.1:8000",
+    "WEBSOCKET_URL": "ws://127.0.0.1:8000/ws/arc_engine",
+    "USERNAME": "your_username", # Replace with actual username for the tracker service
+    "PASSWORD": "your_password", # Replace with actual password
+    "TOKEN": None
+}
 
 # Import the Flask app from map_server.py
 from map_server import app as flask_app, coords as map_coords
@@ -32,13 +45,13 @@ def start_async_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_forever()
 
-
-
 class Communicate(QObject):
     message_received = pyqtSignal(dict)
-    ibis_message_received = pyqtSignal(dict) # New signal for IBIS messages
-
-
+    ibis_message_received = pyqtSignal(dict)
+    telemetry_received = pyqtSignal(dict)
+    drone_connected = pyqtSignal(bool)
+    armed_status_changed = pyqtSignal(bool)
+    drone_log_received = pyqtSignal(str)
 
 class DroneControlGUI(QMainWindow):
     def __init__(self):
@@ -49,6 +62,15 @@ class DroneControlGUI(QMainWindow):
         self.pan = 0
         self.tilt = 0
         self.mission_timer = None
+
+        # Initialize last known telemetry values
+        self.last_lat = 0.0
+        self.last_lon = 0.0
+        self.last_alt = 0.0
+        self.last_ground_speed = 0.0
+        self.last_battery_voltage = 0.0
+        self.last_battery_remaining = 0
+        self.last_signal_strength = 0
 
         self.set_dark_theme()
 
@@ -70,75 +92,38 @@ class DroneControlGUI(QMainWindow):
         # Backends
         self.ws_bridge = WebSocketBridge()
         self.ht_backend = HumanTrackerBackend()
+        self.telemetry_listener = DroneTelemetryListener(telemetry_callback=self.queue_telemetry_message)
+        self.mavlink_communicator = MavlinkCommunicator()
 
         # Communication
         self.comm = Communicate()
         self.comm.message_received.connect(self.handle_ws_message)
-        self.comm.ibis_message_received.connect(self.handle_ibis_ws_message) # Connect new signal
+        self.comm.ibis_message_received.connect(self.handle_ibis_ws_message)
+        self.comm.telemetry_received.connect(self.handle_telemetry_message)
+        self.comm.drone_connected.connect(self.update_connection_status)
+        self.comm.armed_status_changed.connect(self.update_armed_status)
+        self.comm.drone_log_received.connect(self.log_drone_message)
         self.ws_bridge.message_callback = self.queue_ws_message
-        self.ws_bridge.ibis_message_callback = self.queue_ibis_ws_message # Assign IBIS callback
+        self.ws_bridge.ibis_message_callback = self.queue_ibis_ws_message
 
         self.create_main_layout()
 
         # Camera Setup
         self.setup_camera()
 
-        # Start IBIS WebSocket client in the background asyncio loop
+        # Start background services
         asyncio.run_coroutine_threadsafe(
-            self.ws_bridge.connect_to_ibis_ws("ws://127.0.0.1:8000/ws/arc_engine", self.ws_bridge.ibis_message_callback),
+            self.ws_bridge.connect_to_ibis_ws(IBIS_CONFIG["WEBSOCKET_URL"], self.ws_bridge.ibis_message_callback),
             self.async_loop
         )
+        self.telemetry_listener.start() # Start the telemetry listener thread
 
-        # Load IBIS users for facial recognition directly from DB file
-        self.load_ibis_users_from_db_file()
+        # Load IBIS users for facial recognition via API
+        self.load_ibis_users_via_api()
 
-        # Setup timer for monitoring new IBIS images
-        self.ibis_image_monitor_timer = QTimer(self)
-        self.ibis_image_monitor_timer.setInterval(5000) # Check every 5 seconds
-        self.ibis_image_monitor_timer.timeout.connect(self.check_for_new_ibis_images)
-        self.ibis_image_monitor_timer.start()
-        self.known_ibis_images = set() # To keep track of images already processed
-
-        # Telemetry Simulator (for testing map updates)
-        self.telemetry_timer = QTimer(self)
-        self.telemetry_timer.setInterval(1000) # Update every 1 second
-        self.telemetry_timer.timeout.connect(self.simulate_telemetry)
-        self.telemetry_timer.start()
-
-        self._sim_lat = 3.1275
-        self._sim_lon = 101.6579
-        self._sim_lat_direction = 0.0001
-        self._sim_lon_direction = 0.0001
 
     def _run_flask_server(self):
         flask_app.run(host="0.0.0.0", port=5050, debug=False)
-
-    def simulate_telemetry(self):
-        # Simulate drone movement
-        self._sim_lat += self._sim_lat_direction
-        self._sim_lon += self._sim_lon_direction
-
-        # Reverse direction if out of bounds (simple bouncing)
-        if self._sim_lat > 3.1300 or self._sim_lat < 3.1250:
-            self._sim_lat_direction *= -1
-        if self._sim_lon > 101.6600 or self._sim_lon < 101.6550:
-            self._sim_lon_direction *= -1
-
-        telemetry_message = {
-            "type": "telemetry",
-            "drone_id": "SIM-DRONE-01",
-            "telemetry": {
-                "lat": self._sim_lat,
-                "lon": self._sim_lon,
-                "altitude_m": 100,
-                "speed_kmh": 10,
-                "battery_pct": 90,
-                "heading_deg": 45,
-                "flight_time_s": 3600
-            },
-            "gimbal": {"pan_deg": 0, "tilt_deg": 0}
-        }
-        self.comm.message_received.emit(telemetry_message)
 
     def create_main_layout(self):
         main_horizontal_layout = QHBoxLayout()
@@ -170,7 +155,7 @@ class DroneControlGUI(QMainWindow):
 
 
         # --- Center Panel: Video Feed ---
-        self.video_label = QLabel("Initializing Camera...")
+        self.video_label = QLabel("Waiting for video stream...")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet("background-color: black; color: white;")
         main_horizontal_layout.addWidget(self.video_label, 3)
@@ -178,6 +163,19 @@ class DroneControlGUI(QMainWindow):
         # --- Right Panel ---
         right_panel = QVBoxLayout()
         main_horizontal_layout.addLayout(right_panel, 1)
+
+        # Drone Status Indicators
+        status_group = QGroupBox("Drone Status")
+        right_panel.addWidget(status_group)
+        status_layout = QHBoxLayout(status_group)
+        self.connection_status_label = QLabel("DISCONNECTED")
+        self.connection_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.connection_status_label.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+        self.armed_status_label = QLabel("DISARMED")
+        self.armed_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.armed_status_label.setStyleSheet("background-color: gray; color: white; font-weight: bold;")
+        status_layout.addWidget(self.connection_status_label)
+        status_layout.addWidget(self.armed_status_label)
 
         # Drone Telemetry
         telemetry_group = QGroupBox("Drone Telemetry")
@@ -207,11 +205,30 @@ class DroneControlGUI(QMainWindow):
         ht_info_layout.addWidget(self.face_count_label) # Add face count label
         ht_info_layout.addStretch()
 
-        # Notification/Log Area
-        self.notification_log = QTextEdit()
-        self.notification_log.setReadOnly(True)
-        self.notification_log.setPlaceholderText("System notifications and logs will appear here...")
-        right_panel.addWidget(self.notification_log)
+        # Log and Console Tabs
+        self.log_tabs = QTabWidget()
+        right_panel.addWidget(self.log_tabs)
+
+        # System Log Tab
+        self.system_log = QTextEdit()
+        self.system_log.setReadOnly(True)
+        self.log_tabs.addTab(self.system_log, "System Logs")
+
+        # Drone Log Tab
+        self.drone_log = QTextEdit()
+        self.drone_log.setReadOnly(True)
+        self.log_tabs.addTab(self.drone_log, "Drone Logs")
+
+        # MAVLink Console Tab
+        self.mavlink_console_widget = QWidget()
+        self.log_tabs.addTab(self.mavlink_console_widget, "MAVLink Console")
+        console_layout = QVBoxLayout(self.mavlink_console_widget)
+        self.mavlink_console_output = QTextEdit()
+        self.mavlink_console_output.setReadOnly(True)
+        self.mavlink_console_input = QLineEdit()
+        self.mavlink_console_input.returnPressed.connect(self.send_mavlink_console_command)
+        console_layout.addWidget(self.mavlink_console_output)
+        console_layout.addWidget(self.mavlink_console_input)
 
         # --- Bottom Panel: Controls ---
         bottom_panel = QHBoxLayout()
@@ -224,6 +241,22 @@ class DroneControlGUI(QMainWindow):
         self.gimbal_control = GimbalControl()
         self.gimbal_control.gimbal_command.connect(self.send_gimbal_command)
         drone_controls_layout.addWidget(self.gimbal_control)
+
+        arm_button = QPushButton("Arm")
+        arm_button.clicked.connect(self.arm_drone)
+        disarm_button = QPushButton("Disarm")
+        disarm_button.clicked.connect(self.disarm_drone)
+        drone_controls_layout.addWidget(arm_button)
+        drone_controls_layout.addWidget(disarm_button)
+
+        diagnostics_button = QPushButton("Run Diagnostics")
+        diagnostics_button.clicked.connect(self.run_diagnostics)
+        drone_controls_layout.addWidget(diagnostics_button)
+
+        flight_mode_box = QComboBox()
+        flight_mode_box.addItems(["Stabilize", "Loiter", "RTL", "Auto"])
+        flight_mode_box.textActivated.connect(self.set_flight_mode)
+        drone_controls_layout.addWidget(flight_mode_box)
 
         # Human Tracker Controls
         ht_controls_group = QGroupBox("Human Tracker Controls")
@@ -247,32 +280,20 @@ class DroneControlGUI(QMainWindow):
         ht_controls_layout.addWidget(self.save_new_face_button)
 
     def setup_camera(self):
-        available_cameras = detect_available_cameras()
-        if not available_cameras:
-            self.log_message("Camera Error: No cameras found!")
-            sys.exit(1)
-
-        if len(available_cameras) > 1:
-            item, ok = QInputDialog.getItem(self, "Select Camera", "Choose a camera:", 
-                                          [f"Camera {i}" for i in available_cameras], 0, False)
-            if ok and item:
-                self.camera_index = available_cameras[int(item.split()[-1])]
-            else:
-                sys.exit(0)
-        else:
-            self.camera_index = available_cameras[0]
-        
         self.start_video_stream()
 
     def start_video_stream(self):
         try:
-            self.log_message(f"Starting video stream with camera index: {self.camera_index}")
-            self.video_thread = VideoStreamThread(self.ht_backend, self.camera_index, self)
+            self.log_message("Starting RTSP video stream...")
+            rtsp_url = "rtsp://192.168.100.224:8554/unicast"
+            self.video_thread = VideoStreamThread(self.ht_backend, rtsp_url, self)
             self.video_thread.change_pixmap_signal.connect(self.update_image)
             self.video_thread.update_info_signal.connect(self.update_ht_info_panel)
             self.video_thread.update_fps_signal.connect(self.update_fps)
             self.video_thread.face_count_signal.connect(self.update_face_count) # Connect new signal
+            self.video_thread.error_signal.connect(self.log_message)
             self.video_thread.start()
+            self.log_message("Video stream thread started. Waiting for GStreamer pipeline to provide frames...")
         except Exception as e:
             self.log_message(f"Error starting video stream: {e}")
 
@@ -286,13 +307,72 @@ class DroneControlGUI(QMainWindow):
     def queue_ibis_ws_message(self, message):
         self.comm.ibis_message_received.emit(message)
 
+    def queue_telemetry_message(self, message):
+        self.comm.telemetry_received.emit(message)
+        self.comm.drone_log_received.emit(str(message))
+
+    def log_drone_message(self, message):
+        self.drone_log.append(f"[{time.strftime('%H:%M:%S')}] {message}")
+
+    def handle_telemetry_message(self, message):
+        if message.get('status') == 'drone_connected':
+            self.comm.drone_connected.emit(True)
+
+        if 'armed' in message:
+            self.comm.armed_status_changed.emit(message['armed'])
+
+        self.update_telemetry_dashboard(message)
+        self.update_map_position(message)
+
+    def update_connection_status(self, connected):
+        if connected:
+            self.connection_status_label.setText("CONNECTED")
+            self.connection_status_label.setStyleSheet("background-color: green; color: white; font-weight: bold;")
+        else:
+            self.connection_status_label.setText("DISCONNECTED")
+            self.connection_status_label.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+
+    def update_armed_status(self, armed):
+        if armed:
+            self.armed_status_label.setText("ARMED")
+            self.armed_status_label.setStyleSheet("background-color: green; color: white; font-weight: bold;")
+        else:
+            self.armed_status_label.setText("DISARMED")
+            self.armed_status_label.setStyleSheet("background-color: gray; color: white; font-weight: bold;")
+
+    def arm_drone(self):
+        self.log_message("Sending ARM command...")
+        self.mavlink_communicator.arm_disarm(True)
+
+    def set_flight_mode(self, mode):
+        self.log_message(f"Setting flight mode to {mode}")
+        self.mavlink_communicator.set_flight_mode(mode)
+
+    def run_diagnostics(self):
+        self.log_message("--- Running System Diagnostics ---")
+        self.log_message("Checking MAVLink two-way communication...")
+        
+        # This is a blocking call, so it should be run in a thread 
+        # to avoid freezing the GUI. For simplicity, we run it directly here.
+        # In a real-world app, consider a background thread.
+        success = self.mavlink_communicator.run_diagnostics()
+
+        if success:
+            self.log_message("  -> MAVLink Communication: OK")
+        else:
+            self.log_message("  -> MAVLink Communication: FAILED")
+
+        self.log_message("--- Diagnostics Complete ---")
+
+    def disarm_drone(self):
+        self.log_message("Sending DISARM command...")
+        self.mavlink_communicator.arm_disarm(False)
+
     def update_map_position(self, message):
-        telemetry = message.get('telemetry', {})
-        lat = telemetry.get('lat')
-        lon = telemetry.get('lon')
+        lat = message.get('latitude')
+        lon = message.get('longitude')
         if lat is not None and lon is not None:
             print(f"[MAIN_GUI] Sending map update to Flask: Lat={lat}, Lon={lon}")
-            # Update Flask server with new coordinates
             try:
                 requests.get(f"http://127.0.0.1:5050/update/{lat}/{lon}")
             except requests.exceptions.ConnectionError:
@@ -300,9 +380,8 @@ class DroneControlGUI(QMainWindow):
 
     def handle_ws_message(self, message):
         print(f"[MAIN_GUI] handle_ws_message received: {message.get('type')}")
-        if message.get('type') == 'telemetry':
-            self.update_telemetry_dashboard(message)
-            self.update_map_position(message)
+        # Telemetry is now handled by handle_telemetry_message
+        pass
 
     def handle_ibis_ws_message(self, message):
         if message.get('type') == 'emergency':
@@ -320,44 +399,80 @@ class DroneControlGUI(QMainWindow):
                     self.log_message("Error: Could not connect to map server to add waypoint.")
 
     def log_message(self, message):
-        self.notification_log.append(f"[{time.strftime('%H:%M:%S')}] {message}")
+        self.system_log.append(f"[{time.strftime('%H:%M:%S')}] {message}")
 
-    def load_ibis_users_from_db_file(self):
-        DB_PATH = "/Users/kevinarthurdelima/Desktop/test2/ibis_database_system/ibis.db"
-        users_data = []
+    def send_mavlink_console_command(self):
+        command = self.mavlink_console_input.text()
+        if command:
+            self.mavlink_console_output.append(f"> {command}")
+            self.mavlink_communicator.send_text_command(command)
+            self.mavlink_console_input.clear()
+
+    def load_ibis_users_via_api(self):
+        """
+        Logs into the IBIS API, fetches all users with face encodings,
+        and imports them into the human tracker backend.
+        """
+        self.log_message("Attempting to load IBIS users from API...")
+
+        # 1. Authenticate and get token
         try:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("SELECT user_id, name, face_encoding, image_path FROM users")
-            rows = cursor.fetchall()
-            for row in rows:
-                user_id, name, face_encoding, image_path = row
-                users_data.append({
-                    "user_id": user_id,
-                    "name": name,
-                    "face_encoding": face_encoding,
-                    "image_path": image_path
-                })
-            conn.close()
-            self.ht_backend.import_ibis_faces(users_data)
-            self.log_message(f"Loaded {len(users_data)} users from IBIS DB for facial recognition.")
-        except sqlite3.Error as e:
-            self.log_message(f"IBIS DB Error: Could not load users from IBIS DB: {e}")
-        except Exception as e:
-            self.log_message(f"IBIS Integration Error: An unexpected error occurred: {e}")
+            login_data = {
+                "user_id": IBIS_CONFIG["USERNAME"],
+                "password": IBIS_CONFIG["PASSWORD"]
+            }
+            login_url = f"{IBIS_CONFIG['BASE_URL']}/login"
+            response = requests.post(login_url, data=login_data)
 
-    def check_for_new_ibis_images(self):
-        UPLOADS_DIR = "/Users/kevinarthurdelima/Desktop/test2/ibis_database_system/uploads/"
-        if not os.path.exists(UPLOADS_DIR):
+            if response.status_code != 200:
+                self.log_message(f"IBIS API Error: Failed to login. Status: {response.status_code}, Detail: {response.text}")
+                return
+
+            IBIS_CONFIG["TOKEN"] = response.json()["access_token"]
+            self.log_message("IBIS API: Login successful.")
+
+        except requests.exceptions.RequestException as e:
+            self.log_message(f"IBIS API Error: Could not connect to login endpoint: {e}")
             return
 
-        current_files = set(os.listdir(UPLOADS_DIR))
-        new_files = current_files - self.known_ibis_images
+        # 2. Fetch users with faces
+        try:
+            headers = {"Authorization": f"Bearer {IBIS_CONFIG['TOKEN']}"}
+            users_url = f"{IBIS_CONFIG['BASE_URL']}/users_with_faces"
+            response = requests.get(users_url, headers=headers)
 
-        if new_files:
-            self.log_message(f"Detected new IBIS image files: {new_files}. Re-importing users...")
-            self.load_ibis_users_from_db_file()
-            self.known_ibis_images = current_files # Update known files after re-import
+            if response.status_code != 200:
+                self.log_message(f"IBIS API Error: Failed to fetch users. Status: {response.status_code}, Detail: {response.text}")
+                return
+            
+            users_data = response.json()
+
+            # 3. Decode face encodings and prepare data for the backend
+            processed_users = []
+            for user in users_data:
+                try:
+                    # The encoding from the API is a Base64 encoded string of the pickled numpy array
+                    pickled_encoding = base64.b64decode(user["face_encoding"])
+                    face_encoding = pickle.loads(pickled_encoding)
+                    
+                    processed_users.append({
+                        "user_id": user["user_id"],
+                        "name": user["name"],
+                        "face_encoding": face_encoding, # This is now the numpy array
+                        "image_path": user.get("image_path", "") # Ensure image_path is present
+                    })
+                except (pickle.UnpicklingError, base64.binascii.Error, KeyError) as e:
+                    self.log_message(f"Error processing user {user.get('user_id', 'N/A')}: Could not decode face encoding. Error: {e}")
+
+            # 4. Import faces into the backend
+            self.ht_backend.import_ibis_faces(processed_users)
+            self.log_message(f"Loaded {len(processed_users)} users from IBIS API for facial recognition.")
+
+        except requests.exceptions.RequestException as e:
+            self.log_message(f"IBIS API Error: Could not fetch users from endpoint: {e}")
+        except Exception as e:
+            self.log_message(f"IBIS Integration Error: An unexpected error occurred while processing API data: {e}")
+
 
     def set_dark_theme(self):
         dark_palette = QPalette()
@@ -471,33 +586,29 @@ class DroneControlGUI(QMainWindow):
         elif axis == 'tilt':
             self.tilt += direction
         
-        command = {
-            "type": "command",
-            "command": "gimbal",
-            "drone_id": "AERIS-01",
-            "payload": {"pan_deg": self.pan, "tilt_deg": self.tilt}
-        }
-        asyncio.run_coroutine_threadsafe(self.ws_bridge.send_to_all(command), self.async_loop)
+        # Send MAVLink command for gimbal control
+        # Using pan for yaw and tilt for pitch
+        self.mavlink_communicator.send_gimbal_command(pitch=self.tilt, roll=0, yaw=self.pan)
 
     def update_telemetry_dashboard(self, message):
-        telemetry = message.get('telemetry', {})
-        gimbal = message.get('gimbal', {})
-        self.pan = gimbal.get('pan_deg', self.pan)
-        self.tilt = gimbal.get('tilt_deg', self.tilt)
+        # Store last known values
+        if 'latitude' in message: self.last_lat = message.get('latitude')
+        if 'longitude' in message: self.last_lon = message.get('longitude')
+        if 'altitude' in message: self.last_alt = message.get('altitude')
+        if 'ground_speed' in message: self.last_ground_speed = message.get('ground_speed')
+        if 'battery_voltage' in message: self.last_battery_voltage = message.get('battery_voltage')
+        if 'battery_remaining' in message: self.last_battery_remaining = message.get('battery_remaining')
+        if 'signal_strength' in message: self.last_signal_strength = message.get('signal_strength')
 
-        text = f"""
-        Drone ID: {message.get('drone_id')}
-        Lat: {telemetry.get('lat')}
-        Lon: {telemetry.get('lon')}
-        Altitude: {telemetry.get('altitude_m')} m
-        Speed: {telemetry.get('speed_kmh')} km/h
-        Battery: {telemetry.get('battery_pct')} %
-        Heading: {telemetry.get('heading_deg')} °
-        Flight Time: {telemetry.get('flight_time_s')} s
-        Gimbal Pan: {self.pan} °
-        Gimbal Tilt: {self.tilt} °
-        """
-        self.telemetry_dashboard.setText(text)
+        text = f'''
+        Lat: {self.last_lat:.6f}
+        Lon: {self.last_lon:.6f}
+        Altitude: {self.last_alt:.2f} m
+        Speed: {self.last_ground_speed:.2f} m/s
+        Battery: {self.last_battery_voltage:.2f}V ({self.last_battery_remaining}%)
+        Signal: {self.last_signal_strength}
+        '''
+        self.telemetry_dashboard.setText(text.strip())
 
 
 
@@ -581,8 +692,11 @@ class DroneControlGUI(QMainWindow):
             self.log_message("Error: Could not connect to map server to clear waypoints.")
 
     def closeEvent(self, event):
+        self.log_message("Shutting down...")
         self.video_thread.stop()
+        self.telemetry_listener.stop()
         self.ht_backend.save_known_faces()
+        self.telemetry_listener.join() # Wait for the telemetry thread to finish
         event.accept()
 
 if __name__ == "__main__":
