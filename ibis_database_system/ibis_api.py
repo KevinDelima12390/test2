@@ -112,7 +112,7 @@ def register_user(db: Session = Depends(get_db), user_id: str = Form(...), name:
         raise HTTPException(status_code=400, detail="User ID already registered")
 
     # Save image
-    uploads_dir = "uploads"
+    uploads_dir = os.getenv("UPLOADS_DIR", "uploads")
     os.makedirs(uploads_dir, exist_ok=True)
     image_path = os.path.join(uploads_dir, image.filename)
     with open(image_path, "wb") as buffer:
