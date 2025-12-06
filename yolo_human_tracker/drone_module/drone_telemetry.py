@@ -29,7 +29,7 @@ class DroneTelemetryListener(threading.Thread):
         
         while not self._stop_event.is_set():
             # Wait for a new message
-            msg = mav_conn.recv_match(type=['GLOBAL_POSITION_INT', 'SYS_STATUS', 'RC_CHANNELS', 'HEARTBEAT'], blocking=True, timeout=1.0)
+            msg = mav_conn.recv_match(type=['GLOBAL_POSITION_INT', 'SYS_STATUS', 'RC_CHANNELS', 'HEARTBEAT', 'ATTITUDE'], blocking=True, timeout=1.0)
             if msg is None:
                 continue
 
@@ -51,6 +51,13 @@ class DroneTelemetryListener(threading.Thread):
                     "longitude": lon,
                     "altitude": alt,
                     "ground_speed": ground_speed,
+                })
+
+            elif msg_type == 'ATTITUDE':
+                processed_data.update({
+                    "heading": msg.yaw, # Yaw in radians
+                    "pitch": msg.pitch, # Pitch in radians
+                    "roll": msg.roll # Roll in radians
                 })
 
             elif msg_type == "SYS_STATUS":

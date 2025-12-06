@@ -37,6 +37,16 @@ class VideoStreamThread(QThread):
             logging.info(f"Successfully opened RTSP video stream at {self.stream_url}") # Updated log
         
         self.prev_frame_time = 0
+        self.frame_width = 0
+        self.frame_height = 0
+
+    @property
+    def original_frame_width(self):
+        return self.frame_width
+
+    @property
+    def original_frame_height(self):
+        return self.frame_height
 
     def run(self):
         while self._run:
@@ -53,7 +63,9 @@ class VideoStreamThread(QThread):
                     time.sleep(0.1)
                     continue
 
-                display_frame, _, _ = self.backend.process_frame(frame.copy())
+                self.frame_height, self.frame_width, _ = frame.shape
+
+                display_frame, tracked_objects, _ = self.backend.process_frame(frame.copy())
 
                 if display_frame is None:
                     logging.warning("Received empty display_frame after processing.")
@@ -71,9 +83,46 @@ class VideoStreamThread(QThread):
                 current_frame_time = time.time()
                 fps = 1 / (current_frame_time - self.prev_frame_time) if self.prev_frame_time > 0 else 0
                 self.prev_frame_time = current_frame_time
-                self.update_fps_signal.emit(int(fps))
+                # Prepare info for HT panel
+                info_data = {
+                    'name': 'N/A',
+                    'id': 'N/A',
+                    'confidence': 'N/A',
+                    'image': None
+                }
 
-            time.sleep(0.03)
+                if self.backend.selected_person_id is not None:
+                    selected_obj = tracked_objects.get(self.backend.selected_person_id)
+                    if selected_obj:
+                        info_data['id'] = self.backend.selected_person_id
+                        info_data['name'] = selected_obj.get('name', 'Unknown')
+                        info_data['confidence'] = selected_obj.get('face_confidence', 0.0)
+                        
+                        # Extract face image if available
+                        face_rect = selected_obj.get('face_rect')
+                        if face_rect:
+                            top, right, bottom, left = face_rect
+                            # Ensure coordinates are within frame bounds for cropping
+                            top = max(0, top)
+                            bottom = min(frame.shape[0], bottom)
+                            left = max(0, left)
+                            right = min(frame.shape[1], right)
+                            
+                            if bottom > top and right > left:
+                                info_data['image'] = frame[top:bottom, left:right]
+                                # Convert to RGB for proper display in QLabel
+                                if info_data['image'].size > 0:
+                                    info_data['image'] = cv2.cvtColor(info_data['image'], cv2.COLOR_BGR2RGB)
+                    else:
+                        info_data['name'] = 'Person Lost'
+                        info_data['id'] = self.backend.selected_person_id
+                else: # No person selected
+                    info_data['name'] = 'No Person Selected'
+                    info_data['id'] = 'No Person Selected'
+                self.update_info_signal.emit(info_data)
+                self.update_fps_signal.emit(int(fps))
+                self.face_count_signal.emit(len(tracked_objects))
+
 
     def stop(self):
         self._run = False

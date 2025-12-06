@@ -6,6 +6,8 @@ import os
 import pickle
 from collections import deque
 import face_recognition
+from ultralytics.trackers.utils.gmc import GMC
+import math
 
 class HumanTrackerBackend:
     def __init__(self):
@@ -17,7 +19,32 @@ class HumanTrackerBackend:
             self.device = 'mps'
         print(f"Using device for YOLO: {self.device}")
 
-        self.yolo_model = YOLO('yolov8n.pt').to(self.device)
+        self.yolo_model = YOLO('yolov9c.pt').to(self.device)
+
+        # Initialize GMC (Global Motion Compensation)
+        self.gmc_tracker = GMC(method="sparseOptFlow")
+
+        # --- YuNet Face Detector ---
+        self.YUNET_MODEL_PATH = 'models/face_detection_yunet_2023mar.onnx'
+        try:
+            self.yunet_detector = cv2.FaceDetectorYN.create(self.YUNET_MODEL_PATH, "", (320, 320))
+            if self.yunet_detector is not None:
+                # Set preferable backend and target for M2 chip optimization
+                # self.yunet_detector.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV) # Not an attribute of FaceDetectorYN
+                # self.yunet_detector.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU) # Not an attribute of FaceDetectorYN
+                print("YuNet ONNX model loaded successfully using cv2.FaceDetectorYN.")
+                # For potential MPS acceleration (if supported by OpenCV's DNN for ONNX)
+                if torch.backends.mps.is_available():
+                    print("MPS (Metal Performance Shaders) is available. Consider trying DNN_TARGET_MPS if issues arise with CPU.")
+            else:
+                raise Exception("Failed to create cv2.FaceDetectorYN object.")
+        except Exception as e:
+            print(f"Error loading YuNet ONNX model: {e}. Face detection will not be available.")
+            self.yunet_detector = None
+
+        # --- RetinaFace Model ---
+
+
 
         # --- Face recognition config ---
         self.FACE_RECOGNITION_DISTANCE_THRESHOLD = 0.6
@@ -39,6 +66,7 @@ class HumanTrackerBackend:
         # --- State ---
         self.face_recognition_enabled = False
         self.low_light_enhancement_enabled = False
+        self.selected_person_id = None # New attribute for selected person
 
         # --- Stream State ---
         self.paused = False
@@ -48,7 +76,7 @@ class HumanTrackerBackend:
             "recognized": (0, 255, 0),
             "unidentified": (0, 165, 255),
             "unknown": (0, 0, 255),
-            "face": (255, 0, 0)
+            "face": (255, 0, 0) # Changed from face as an explicit request by the user
         }
         self.FONT = cv2.FONT_HERSHEY_SIMPLEX
         self.FONT_SCALE = 0.6
@@ -122,8 +150,158 @@ class HumanTrackerBackend:
         self.low_light_enhancement_enabled = not self.low_light_enhancement_enabled
         return self.low_light_enhancement_enabled
 
+    def set_selected_person(self, person_id):
+        self.selected_person_id = person_id
+        print(f"Selected person: {self.selected_person_id}")
+
+
+
+    def get_tracked_object_info(self, person_id):
+        """
+        Returns the tracking information for a given person_id.
+        """
+        return self.tracked_objects.get(person_id)
+
+    def get_current_unidentified_faces_for_saving(self):
+        """
+        Returns a list of currently tracked but unidentified faces,
+        suitable for presenting to the user for saving and identification.
+        """
+        unidentified_faces_info = []
+        for face_id, data in self.known_faces_db.items():
+            if face_id.startswith("Unidentified_"):
+                face_image = data.get('image')
+                face_encoding = data.get('encodings')[0] if data.get('encodings') else None
+                
+                if face_image is not None and face_encoding is not None:
+                    unidentified_faces_info.append({
+                        'person_id': face_id, # Use the Unidentified_X as the person_id for saving
+                        'face_image': face_image,
+                        'face_encoding': face_encoding
+                    })
+        return unidentified_faces_info
+
+    def save_new_face(self, encoding, name):
+        """
+        Saves a new identified face to the known faces database.
+        Args:
+            encoding (np.ndarray): The face encoding to save.
+            name (str): The name associated with this face.
+        Returns:
+            tuple: (success (bool), message (str))
+        """
+        try:
+            # Check if name already exists as an ID in known_faces_db
+            if name in self.known_faces_db:
+                # If name exists, add this new encoding to the existing entry
+                self.known_faces_db[name]['encodings'].append(encoding)
+                message = f"Added new encoding for existing person: {name}."
+            else:
+                # Create a new entry for this person
+                self.known_faces_db[name] = {
+                    'encodings': deque([encoding], maxlen=self.MAX_FACE_IMAGES_PER_PERSON),
+                    'image': None, # No image provided directly in this method
+                    'name': name
+                }
+                message = f"New person '{name}' saved successfully."
+
+            self.save_known_faces() # Save the updated database to disk
+            return True, message
+        except Exception as e:
+            return False, f"Error saving new face: {e}"
+
+    def get_unidentified_face_ids(self):
+        """
+        Returns a list of IDs for currently unidentified faces in the database.
+        """
+        return [face_id for face_id in self.known_faces_db.keys() if face_id.startswith("Unidentified_")]
+
+    def name_unidentified_person(self, target_face_id, new_name):
+        """
+        Assigns a new name to an unidentified face and updates the database.
+        Args:
+            target_face_id (str): The 'Unidentified_' ID of the face to name.
+            new_name (str): The new name for this face.
+        Returns:
+            tuple: (success (bool), message (str))
+        """
+        try:
+            if target_face_id not in self.known_faces_db or not target_face_id.startswith("Unidentified_"):
+                return False, "Target face ID not found or is already identified."
+
+            if new_name in self.known_faces_db:
+                # Merge encodings if new_name already exists
+                existing_data = self.known_faces_db[new_name]
+                new_face_data = self.known_faces_db[target_face_id]
+                
+                # Append new encodings, respecting maxlen
+                for enc in new_face_data['encodings']:
+                    if enc not in existing_data['encodings']: # Avoid duplicates if possible
+                        existing_data['encodings'].append(enc)
+                message = f"Merged '{target_face_id}' into existing person '{new_name}'."
+            else:
+                # Rename the entry in known_faces_db
+                self.known_faces_db[new_name] = self.known_faces_db[target_face_id]
+                self.known_faces_db[new_name]['name'] = new_name # Update the name field
+                message = f"Unidentified face '{target_face_id}' named as '{new_name}'."
+
+            del self.known_faces_db[target_face_id] # Remove the old unidentified entry
+            self.save_known_faces()
+            return True, message
+        except Exception as e:
+            return False, f"Error naming unidentified person: {e}"
+
+    def get_known_person_names(self):
+        """
+        Returns a list of names for identified people in the database (not starting with "Unidentified_").
+        """
+        return [name for name in self.known_faces_db.keys() if not name.startswith("Unidentified_")]
+
+    def edit_person_name(self, old_name, new_name):
+        """
+        Edits the name of an identified person in the database.
+        Args:
+            old_name (str): The current name of the person.
+            new_name (str): The new name for the person.
+        Returns:
+            tuple: (success (bool), message (str))
+        """
+        try:
+            if old_name not in self.known_faces_db:
+                return False, f"Person '{old_name}' not found in the database."
+            if new_name == old_name:
+                return False, "New name is the same as the old name."
+            if new_name.startswith("Unidentified_"):
+                return False, "Cannot rename to an 'Unidentified_' ID format."
+
+            if new_name in self.known_faces_db:
+                # Merge encodings if new_name already exists
+                existing_data = self.known_faces_db[new_name]
+                old_name_data = self.known_faces_db[old_name]
+                
+                for enc in old_name_data['encodings']:
+                    if enc not in existing_data['encodings']:
+                        existing_data['encodings'].append(enc)
+                message = f"Merged '{old_name}' into existing person '{new_name}'."
+            else:
+                # Rename the entry
+                self.known_faces_db[new_name] = self.known_faces_db[old_name]
+                self.known_faces_db[new_name]['name'] = new_name
+                message = f"Person '{old_name}' renamed to '{new_name}'."
+
+            del self.known_faces_db[old_name] # Remove the old entry
+            self.save_known_faces()
+            return True, message
+        except Exception as e:
+            return False, f"Error editing person's name: {e}"
+
+
+
     # ---------------------- Frame processing ----------------------
     def process_frame(self, frame):
+        if self.paused:
+            return frame, self.tracked_objects, self.known_faces_db
+
         if self.low_light_enhancement_enabled:
             lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
             l, a, b = cv2.split(lab)
@@ -132,109 +310,210 @@ class HumanTrackerBackend:
             frame = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
             frame = cv2.bilateralFilter(frame, 9, 75, 75)
 
-        # YOLO detection
-        results = self.yolo_model(frame, device=self.device, verbose=False)
-        detections = []
-        for r in results:
-            for box in r.boxes:
-                if self.yolo_model.names[int(box.cls)] == 'person':
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    conf = float(box.conf[0])
-                    detections.append([x1, y1, x2, y2, conf])
+        # Perform tracking using YOLOv8's track method with the custom ByteTrack config
+        # The 'tracker' argument points to our custom YAML file
+        results = self.yolo_model.track(
+            source=frame,
+            persist=True, # Persist tracks across frames
+            device=self.device,
+            verbose=False,
+            tracker='drone_module/bytetrack_custom.yaml',
+            conf=0.3, # Detection confidence threshold before tracking
+            iou=0.5 # IoU threshold for NMS before tracking
+        )
 
-        centroids = [(int((x1+x2)/2), int((y1+y2)/2)) for x1,y1,x2,y2,_ in detections]
+        # Process tracking results
+        if results[0].boxes is not None and results[0].boxes.id is not None:
+            # results[0].boxes.data contains [x1, y1, x2, y2, track_id, confidence, class_id]
+            tracked_data = results[0].boxes.data.cpu().numpy()
+            
+            # Filter for 'person' class (class_id 0 in COCO, assuming yolov8 was trained on COCO)
+            person_detections = tracked_data[tracked_data[:, -1] == 0] 
 
-        # Prepare known face encodings
-        known_encodings = []
-        known_ids = []
-        for face_id, data in self.known_faces_db.items():
-            for enc in data['encodings']:
-                if isinstance(enc, np.ndarray) and enc.size > 0:
-                    known_encodings.append(enc)
-                    known_ids.append(face_id)
+            current_tracked_objects = {}
+            for *xyxy, track_id, conf, cls_id in person_detections:
+                track_id = int(track_id)
+                x1, y1, x2, y2 = map(int, xyxy)
+                centroid = (int((x1 + x2) / 2), int((y1 + y2) / 2))
 
-        # --- Track objects ---
-        next_tracked = {}
-        used = set()
-        for pid, obj in self.tracked_objects.items():
-            min_dist = float('inf')
-            best_idx = -1
-            for i, c in enumerate(centroids):
-                if i in used: continue
-                dist = np.linalg.norm(np.array(obj['centroid']) - np.array(c))
-                if dist < 150 and dist < min_dist:
-                    min_dist = dist
-                    best_idx = i
-            if best_idx != -1:
-                det = detections[best_idx]
-                next_tracked[pid] = {**obj, 'box': det[:4], 'centroid': centroids[best_idx]}
-                used.add(best_idx)
+                obj = self.tracked_objects.get(track_id, {
+                    'face_id': None, 
+                    'face_rect': None, 
+                    'face_confidence': 0.0, 
+                    'name':'Unknown'
+                })
+                obj.update({
+                    'box': [x1, y1, x2, y2],
+                    'centroid': centroid,
+                    'conf': float(conf),
+                    'cls': int(cls_id)
+                })
+                current_tracked_objects[track_id] = obj
+            self.tracked_objects = current_tracked_objects
+        else:
+            self.tracked_objects = {} # Clear tracked objects if nothing is detected/tracked
 
-        # Add new detections
-        for i, det in enumerate(detections):
-            if i in used: continue
-            pid = f"person_{self.next_person_id_counter}"
-            self.next_person_id_counter += 1
-            next_tracked[pid] = {'box': det[:4], 'centroid': centroids[i], 'face_id': None, 'face_rect': None, 'face_confidence': 0.0, 'name':'Unknown'}
+        # --- Face recognition for selected person using YuNet ---
+        if self.face_recognition_enabled and self.yunet_detector is not None and self.selected_person_id in self.tracked_objects:
+            obj = self.tracked_objects[self.selected_person_id]
+            x1, y1, x2, y2 = obj['box']
+            # Ensure coordinates are within frame bounds
+            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(frame.shape[1], x2), min(frame.shape[0], y2)
+            
+            # Crop ROI for the selected person
+            roi = frame[y1:y2, x1:x2]
+            
+            if roi.size > 0:
+                h_roi, w_roi, _ = roi.shape
+                
+                # Calculate padding to make ROI square
+                pad_left, pad_top = 0, 0
+                if h_roi > w_roi:
+                    pad_size = (h_roi - w_roi) // 2
+                    padded_roi = cv2.copyMakeBorder(roi, 0, 0, pad_size, pad_size, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+                    pad_left = pad_size
+                elif w_roi > h_roi:
+                    pad_size = (w_roi - h_roi) // 2
+                    padded_roi = cv2.copyMakeBorder(roi, pad_size, pad_size, 0, 0, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+                    pad_top = pad_size
+                else: # Already square
+                    padded_roi = roi
+                
+                # Resize padded ROI to the fixed input size of YuNet model
+                resized_roi = cv2.resize(padded_roi, (320, 320))
+                
+                # Detect faces in the ROI using YuNet
+                retval, faces_in_roi = self.yunet_detector.detect(resized_roi)
+                
+                # print(f"Type of faces_in_roi: {type(faces_in_roi)}, Value: {faces_in_roi}") # Debug statement removed after verification
+                
+                if retval and faces_in_roi is not None and len(faces_in_roi) > 0:
+                    # Take the first detected face (assuming one main face per person bounding box)
+                    # YuNet output: [x1, y1, w, h, score, ...]
+                    x1_det, y1_det, w_det, h_det = map(int, faces_in_roi[0][:4])
 
-        # --- Face recognition ---
-        for pid, obj in next_tracked.items():
-            if self.face_recognition_enabled and (obj['face_id'] is None or obj['face_id'] == "No Face Detected"):
-                x1, y1, x2, y2 = obj['box']
-                x1, y1, x2, y2 = max(0, x1), max(0, y1), min(frame.shape[1], x2), min(frame.shape[0], y2)
-                roi = frame[y1:y2, x1:x2]
-                if roi.size == 0: continue
-                rgb_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-                faces = face_recognition.face_locations(rgb_roi)
-                if faces:
-                    face_rect = faces[0]
-                    obj['face_rect'] = face_rect
-                    enc_list = face_recognition.face_encodings(rgb_roi, [face_rect])
+                    # Scale factor from 320x320 to padded_roi size
+                    scale_factor = padded_roi.shape[0] / 320 # Since padded_roi is square, width == height
+
+                    # Adjust face_rect_roi coordinates back to the padded ROI scale
+                    x1_scaled = int(x1_det * scale_factor)
+                    y1_scaled = int(y1_det * scale_factor)
+                    w_scaled = int(w_det * scale_factor)
+                    h_scaled = int(h_det * scale_factor)
+
+                    # Un-pad to get coordinates relative to the original 'roi'
+                    x1_unpadded = x1_scaled - pad_left
+                    y1_unpadded = y1_scaled - pad_top
+                    
+                    # Calculate corresponding bottom-right
+                    x2_unpadded = x1_unpadded + w_scaled
+                    y2_unpadded = y1_unpadded + h_scaled
+
+                    # Convert to (top, right, bottom, left) format relative to original 'roi'
+                    face_rect_roi_unpadded = (y1_unpadded, x2_unpadded, y2_unpadded, x1_unpadded)
+                    
+                    # Convert face_rect_roi_unpadded coordinates to original frame coordinates
+                    top_orig = face_rect_roi_unpadded[0] + y1
+                    right_orig = face_rect_roi_unpadded[1] + x1
+                    bottom_orig = face_rect_roi_unpadded[2] + y1
+                    left_orig = face_rect_roi_unpadded[3] + x1
+                    face_rect_original_frame = (top_orig, right_orig, bottom_orig, left_orig)
+                    
+                    obj['face_rect'] = face_rect_original_frame # Store face rect in original frame coordinates
+
+                    rgb_frame_for_encoding = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    enc_list = face_recognition.face_encodings(rgb_frame_for_encoding, [face_rect_original_frame])
+                    
                     if enc_list:
                         encoding = enc_list[0]
                         match_found = False
-                        if known_encodings:
-                            distances = face_recognition.face_distance(known_encodings, encoding)
-                            best_idx = np.argmin(distances)
-                            if distances[best_idx] < self.FACE_RECOGNITION_DISTANCE_THRESHOLD:
-                                fid = known_ids[best_idx]
-                                obj.update({
-                                    'face_id': fid,
-                                    'name': self.known_faces_db[fid].get('name', 'Unknown'),
-                                    'face_confidence': 1.0 - distances[best_idx]
-                                })
-                                match_found = True
+                        if self.known_faces_db: # Only try matching if we have known faces
+                            known_encodings_flat = []
+                            known_ids_flat = []
+                            for face_id, data in self.known_faces_db.items():
+                                for enc in data['encodings']:
+                                    known_encodings_flat.append(enc)
+                                    known_ids_flat.append(face_id)
+                            
+                            if known_encodings_flat:
+                                distances = face_recognition.face_distance(known_encodings_flat, encoding)
+                                best_idx = np.argmin(distances)
+                                if distances[best_idx] < self.FACE_RECOGNITION_DISTANCE_THRESHOLD:
+                                    fid = known_ids_flat[best_idx]
+                                    obj.update({
+                                        'face_id': fid,
+                                        'name': self.known_faces_db[fid].get('name', 'Unknown'),
+                                        'face_confidence': 1.0 - distances[best_idx]
+                                    })
+                                    # Add new encoding to the deque for continuous learning if not too close
+                                    if distances[best_idx] > self.MIN_DISTINCT_FACE_DISTANCE:
+                                        self.known_faces_db[fid]['encodings'].append(encoding)
+                                    match_found = True
                         if not match_found:
-                            fid = f"Unidentified_{self.next_person_id_counter}"
-                            self.next_person_id_counter +=1
-                            top, right, bottom, left = face_rect
-                            face_img = roi[top:bottom, left:right]
-                            self.known_faces_db[fid] = {
+                            # Assign new "Unidentified" ID if no match is found
+                            new_unidentified_id = f"Unidentified_{self.next_person_id_counter}"
+                            self.next_person_id_counter += 1
+                            
+                            # Extract face image from original frame using corrected coordinates
+                            face_img = frame[top_orig:bottom_orig, left_orig:right_orig]
+                            self.known_faces_db[new_unidentified_id] = {
                                 'encodings': deque([encoding], maxlen=self.MAX_FACE_IMAGES_PER_PERSON),
-                                'image': cv2.resize(face_img,(100,100)) if face_img.size>0 else None,
-                                'name':'Unknown'
+                                'image': cv2.resize(face_img, (100, 100)) if face_img.size > 0 else None,
+                                'name': 'Unknown'
                             }
-                            obj['face_id'] = fid
+                            obj['face_id'] = new_unidentified_id
+                            obj['name'] = 'Unknown' # Explicitly set for new unidentified
                     else:
-                        obj['face_id'] = "No Face Detected"
+                        obj['face_id'] = "No Face Detected" # No encoding found for the detected face
                 else:
-                    obj['face_id'] = "No Face Detected"
+                    obj['face_id'] = "No Face Detected" # No face detected in ROI
+            else:
+                obj['face_id'] = "No Face Detected" # ROI size is 0
 
-        self.tracked_objects = next_tracked
         frame = self.draw_overlays(frame, self.tracked_objects)
         return frame, self.tracked_objects, self.known_faces_db
 
-    # ---------------------- Drawing ----------------------
+    # ---------------------- Drawing Overlays ----------------------
     def draw_overlays(self, frame, tracked_objects):
-        for pid, obj in tracked_objects.items():
+        for track_id, obj in tracked_objects.items():
             x1, y1, x2, y2 = obj['box']
+            centroid_x, centroid_y = obj['centroid']
             name = obj.get('name', 'Unknown')
-            color = self.BOX_COLORS['recognized'] if name != 'Unknown' else self.BOX_COLORS['unidentified']
+            face_id = obj.get('face_id', '')
+
+            color = self.BOX_COLORS["unidentified"]
+            if face_id and face_id != "No Face Detected":
+                if face_id.startswith("Unidentified_"):
+                    color = self.BOX_COLORS["unknown"]
+                else:
+                    color = self.BOX_COLORS["recognized"]
+
+            # Highlight selected person
+            if track_id == self.selected_person_id:
+                color = (255, 255, 0) # Yellow for selected person
+
+            # Draw bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, name, (x1, y1-10), self.FONT, self.FONT_SCALE, color, self.FONT_THICKNESS)
-            # Draw face rectangle
+
+            # Draw label background
+            label = f"ID: {track_id} {name}"
+            (text_w, text_h), baseline = cv2.getTextSize(label, self.FONT, self.FONT_SCALE, self.FONT_THICKNESS)
+            cv2.rectangle(frame, (x1, y1 - text_h - baseline), (x1 + text_w, y1), color, -1)
+            cv2.putText(frame, label, (x1, y1 - baseline), self.FONT, self.FONT_SCALE, (255, 255, 255), self.FONT_THICKNESS, cv2.LINE_AA)
+
+            # Draw face rectangle if available
             if obj.get('face_rect'):
                 top, right, bottom, left = obj['face_rect']
-                top += y1; bottom += y1; left += x1; right += x1
-                cv2.rectangle(frame, (left, top), (right, bottom), self.BOX_COLORS['face'], 1)
+                face_center_x = (left + right) // 2
+                face_center_y = (top + bottom) // 2
+                face_radius = max(right - left, bottom - top) // 2
+
+                if track_id == self.selected_person_id:
+                    # Draw a circle if following
+                    cv2.circle(frame, (face_center_x, face_center_y), face_radius, self.BOX_COLORS["face"], 2)
+                    cv2.putText(frame, f"Face: {face_id}", (left, top - 10), self.FONT, self.FONT_SCALE * 0.7, self.BOX_COLORS["face"], 2, cv2.LINE_AA)
+                else:
+                    # Draw a square if not following
+                    cv2.rectangle(frame, (left, top), (right, bottom), self.BOX_COLORS["face"], 2)
+                    cv2.putText(frame, f"Face: {face_id}", (left, top - 10), self.FONT, self.FONT_SCALE * 0.7, self.BOX_COLORS["face"], 2, cv2.LINE_AA)
         return frame

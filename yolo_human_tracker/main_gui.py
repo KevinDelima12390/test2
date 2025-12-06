@@ -18,6 +18,8 @@ from PyQt6.QtCore import Qt, pyqtSignal, QObject, QUrl, pyqtSlot, QTimer, QTimer
 from PyQt6.QtGui import QPixmap
 import webbrowser # Import webbrowser
 
+import math # Import math for radian to degree conversion
+
 import requests # Import requests for HTTP calls
 import sqlite3 # Import sqlite3 for direct DB access
 
@@ -29,6 +31,9 @@ from drone_module.drone_telemetry import DroneTelemetryListener
 from drone_module.waypoint_deployer import WaypointDeployer
 from drone_module.human_tracker_backend import HumanTrackerBackend
 from drone_module.video_stream import VideoStreamThread
+from drone_module.position_tracker import PositionTracker # Import PositionTracker
+from drone_module.attitude_indicator import AttitudeIndicatorWidget
+from drone_module.compass_widget import CompassWidget
 
 # IBIS Configuration
 IBIS_CONFIG = {
@@ -54,10 +59,18 @@ class Communicate(QObject):
     armed_status_changed = pyqtSignal(bool)
     drone_log_received = pyqtSignal(str)
 
+class ClickableVideoLabel(QLabel):
+    clicked_coordinates = pyqtSignal(int, int)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked_coordinates.emit(event.pos().x(), event.pos().y())
+        super().mousePressEvent(event)
+
 class DroneControlGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("UAV Ground Control Station")
+        self.setWindowTitle("ARC_ENGIN")
         self.setGeometry(100, 100, 1800, 1000)
 
         self.pan = 0
@@ -72,6 +85,15 @@ class DroneControlGUI(QMainWindow):
         self.last_battery_voltage = 0.0
         self.last_battery_remaining = 0
         self.last_signal_strength = 0
+
+        self.selected_person_id = None # Initialize selected person ID
+        self.gimbal_follow_active = False # Initialize gimbal follow state
+        self.gimbal_follow_timer = QTimer(self)
+        self.gimbal_follow_timer.timeout.connect(self.update_gimbal_follow)
+
+        self.drone_follow_active = False # Initialize drone follow state
+        self.drone_follow_timer = QTimer(self)
+        self.drone_follow_timer.timeout.connect(self.update_drone_follow)
 
         self.set_dark_theme()
 
@@ -95,6 +117,11 @@ class DroneControlGUI(QMainWindow):
         self.ht_backend = HumanTrackerBackend()
         self.telemetry_listener = DroneTelemetryListener(telemetry_callback=self.queue_telemetry_message)
         self.mavlink_communicator = MavlinkCommunicator()
+        self.position_tracker = PositionTracker(self.mavlink_communicator) # Initialize PositionTracker
+        self.waypoint_deployer = WaypointDeployer(self.mavlink_communicator) # Initialize WaypointDeployer with mavlink_communicator
+
+        self.attitude_indicator = AttitudeIndicatorWidget(self)
+        self.compass_widget = CompassWidget(self)
 
         # Communication
         self.comm = Communicate()
@@ -147,7 +174,6 @@ class DroneControlGUI(QMainWindow):
         waypoint_group = QGroupBox("Mission Waypoints")
         left_panel.addWidget(waypoint_group)
         waypoint_layout = QVBoxLayout(waypoint_group)
-        self.waypoint_deployer = WaypointDeployer()
         self.waypoint_deployer.start_mission.connect(self.start_mission_animation)
         waypoint_layout.addWidget(self.waypoint_deployer)
 
@@ -157,9 +183,10 @@ class DroneControlGUI(QMainWindow):
 
 
         # --- Center Panel: Video Feed ---
-        self.video_label = QLabel("Waiting for video stream...")
+        self.video_label = ClickableVideoLabel("Waiting for video stream...")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet("background-color: black; color: white;")
+        self.video_label.clicked_coordinates.connect(self.handle_video_click)
         main_horizontal_layout.addWidget(self.video_label, 3)
 
         # --- Right Panel ---
@@ -182,10 +209,19 @@ class DroneControlGUI(QMainWindow):
         # Drone Telemetry
         telemetry_group = QGroupBox("Drone Telemetry")
         right_panel.addWidget(telemetry_group)
-        telemetry_layout = QVBoxLayout(telemetry_group)
+        telemetry_layout = QVBoxLayout(telemetry_group) # Existing layout for the group
+
+        # New Horizontal Layout for visual indicators
+        telemetry_visual_layout = QHBoxLayout()
+        telemetry_layout.addLayout(telemetry_visual_layout)
+        
+        telemetry_visual_layout.addWidget(self.attitude_indicator)
+        telemetry_visual_layout.addWidget(self.compass_widget)
+
+        # Simplified text telemetry dashboard
         self.telemetry_dashboard = QLabel("Waiting for drone connection...")
         self.telemetry_dashboard.setAlignment(Qt.AlignmentFlag.AlignTop)
-        telemetry_layout.addWidget(self.telemetry_dashboard)
+        telemetry_layout.addWidget(self.telemetry_dashboard) # Keep existing text dashboard below visuals
 
         # Human Tracker Info
         ht_info_group = QGroupBox("Human Tracker Info")
@@ -242,6 +278,7 @@ class DroneControlGUI(QMainWindow):
         drone_controls_layout = QHBoxLayout(drone_controls_group)
         self.gimbal_control = GimbalControl()
         self.gimbal_control.gimbal_command.connect(self.send_gimbal_command)
+        self.gimbal_control.follow_gimbal_command.connect(self.send_mavlink_gimbal_follow_command)
         drone_controls_layout.addWidget(self.gimbal_control)
 
         arm_button = QPushButton("Arm")
@@ -272,10 +309,19 @@ class DroneControlGUI(QMainWindow):
         self.name_button.clicked.connect(self.name_person)
         self.edit_name_button = QPushButton("Edit Name")
         self.edit_name_button.clicked.connect(self.edit_name)
+        
+        self.gimbal_follow_button = QPushButton("Gimbal Follow")
+        self.gimbal_follow_button.clicked.connect(self.toggle_gimbal_follow)
+
+        self.drone_follow_button = QPushButton("Drone Follow")
+        self.drone_follow_button.clicked.connect(self.toggle_drone_follow)
+
         ht_controls_layout.addWidget(self.fr_toggle_button)
         ht_controls_layout.addWidget(self.ll_toggle_button)
         ht_controls_layout.addWidget(self.name_button)
         ht_controls_layout.addWidget(self.edit_name_button)
+        ht_controls_layout.addWidget(self.gimbal_follow_button)
+        ht_controls_layout.addWidget(self.drone_follow_button)
 
         self.save_new_face_button = QPushButton("Save New Face")
         self.save_new_face_button.clicked.connect(self.save_new_face_dialog)
@@ -325,6 +371,23 @@ class DroneControlGUI(QMainWindow):
 
         self.update_telemetry_dashboard(message)
         self.update_map_position(message)
+
+        # Update visual telemetry widgets
+        pitch_rad = message.get('pitch', 0.0) # Assume pitch is in radians
+        roll_rad = message.get('roll', 0.0) # Assume roll is in radians
+        yaw_rad = message.get('yaw', 0.0) # Assume yaw (heading) is in radians
+
+        # Convert radians to degrees for the widgets
+        pitch_deg = math.degrees(pitch_rad)
+        roll_deg = math.degrees(roll_rad)
+        yaw_deg = math.degrees(yaw_rad)
+        
+        # Ensure yaw is within 0-360 range
+        if yaw_deg < 0:
+            yaw_deg += 360
+        
+        self.attitude_indicator.update_attitude(pitch_deg, roll_deg)
+        self.compass_widget.update_heading(yaw_deg)
 
     def update_connection_status(self, connected):
         if connected:
@@ -515,6 +578,58 @@ class DroneControlGUI(QMainWindow):
     def update_face_count(self, count):
         self.face_count_label.setText(f"Faces: {count}")
 
+    def handle_video_click(self, x, y):
+        # Get dimensions of the QLabel and the original frame
+        label_width = self.video_label.width()
+        label_height = self.video_label.height()
+        frame_width = self.video_thread.original_frame_width
+        frame_height = self.video_thread.original_frame_height
+
+        if frame_width == 0 or frame_height == 0:
+            self.log_message("Video stream not active or frame dimensions unknown.")
+            self.ht_backend.set_selected_person(None)
+            return
+
+        # Calculate scaling factors, considering aspect ratio
+        aspect_ratio_label = label_width / label_height
+        aspect_ratio_frame = frame_width / frame_height
+
+        if aspect_ratio_label > aspect_ratio_frame:
+            # Label is wider than frame, frame is height-limited
+            scaled_frame_width = int(label_height * aspect_ratio_frame)
+            scaled_frame_height = label_height
+            offset_x = (label_width - scaled_frame_width) / 2
+            offset_y = 0
+        else:
+            # Label is taller than frame, frame is width-limited
+            scaled_frame_width = label_width
+            scaled_frame_height = int(label_width / aspect_ratio_frame)
+            offset_x = 0
+            offset_y = (label_height - scaled_frame_height) / 2
+
+        # Convert click coordinates from QLabel to scaled frame
+        click_x_scaled = x - offset_x
+        click_y_scaled = y - offset_y
+
+        # Convert scaled frame coordinates to original frame coordinates
+        original_x = int(click_x_scaled * (frame_width / scaled_frame_width))
+        original_y = int(click_y_scaled * (frame_height / scaled_frame_height))
+
+        self.log_message(f"Clicked on QLabel at ({x}, {y}). Converted to original frame coordinates: ({original_x}, {original_y})")
+
+        selected_id = None
+        for pid, obj in self.ht_backend.tracked_objects.items():
+            x1, y1, x2, y2 = obj['box']
+            if x1 <= original_x <= x2 and y1 <= original_y <= y2:
+                selected_id = pid
+                break
+        
+        self.ht_backend.set_selected_person(selected_id)
+        if selected_id:
+            self.log_message(f"Selected person with ID: {selected_id}")
+        else:
+            self.log_message("No person selected.")
+
     def toggle_fr(self):
         status = self.ht_backend.toggle_face_recognition()
         self.fr_toggle_button.setText(f"FR: {'On' if status else 'Off'}")
@@ -561,24 +676,154 @@ class DroneControlGUI(QMainWindow):
             return
 
         # Present options to the user
-        face_options = [f"ID: {info['temp_id']} (Confidence: {info['confidence']:.2f})" for info in detected_faces_info]
+        face_options = [f"ID: {info['person_id']}" for info in detected_faces_info]
         selected_option, ok = QInputDialog.getItem(self, "Save New Face", "Select a face to save:", face_options, 0, False)
 
         if ok and selected_option:
             # Extract the temporary ID from the selected option string
-            temp_id = selected_option.split(' ')[1]
-            selected_face_data = next((info for info in detected_faces_info if info['temp_id'] == temp_id), None)
+            # It will be in the format "ID: Unidentified_X"
+            person_id_from_option = selected_option.split(': ')[1]
+            selected_face_data = next((info for info in detected_faces_info if info['person_id'] == person_id_from_option), None)
 
             if selected_face_data:
-                new_name, ok_name = QInputDialog.getText(self, "Enter Name", f"Enter a name for {selected_face_data['temp_id']}:")
+                new_name, ok_name = QInputDialog.getText(self, "Enter Name", f"Enter a name for {selected_face_data['person_id']}:")
                 if ok_name and new_name and not new_name.isspace():
-                    success, message = self.ht_backend.save_new_face(selected_face_data['encoding'], new_name)
+                    success, message = self.ht_backend.save_new_face(selected_face_data['face_encoding'], new_name)
                     if success:
                         self.log_message(f"Save New Face: {message}")
                     else:
                         self.log_message(f"Save New Face Error: {message}")
             else:
                 self.log_message("Save New Face Error: Selected face data not found.")
+
+    def toggle_gimbal_follow(self):
+        if not self.ht_backend.selected_person_id:
+            self.log_message("Please select a person to enable gimbal follow.")
+            return
+
+        self.gimbal_follow_active = not self.gimbal_follow_active
+        if self.gimbal_follow_active:
+            self.gimbal_follow_button.setText("Gimbal Follow: On")
+            self.log_message(f"Gimbal follow ENABLED for {self.ht_backend.selected_person_id}.")
+            self.gimbal_follow_timer.start(int(1000 / 30)) # 30 Hz for gimbal control
+        else:
+            self.gimbal_follow_button.setText("Gimbal Follow: Off")
+            self.log_message(f"Gimbal follow DISABLED.")
+            self.gimbal_follow_timer.stop()
+
+    def toggle_drone_follow(self):
+        if not self.ht_backend.selected_person_id:
+            self.log_message("Please select a person to enable drone follow.")
+            return
+        
+        # If gimbal follow is active, disable it first.
+        if self.gimbal_follow_active:
+            self.toggle_gimbal_follow()
+
+        self.drone_follow_active = not self.drone_follow_active
+        if self.drone_follow_active:
+            self.drone_follow_button.setText("Drone Follow: On")
+            self.log_message(f"Drone follow ENABLED for {self.ht_backend.selected_person_id}.")
+            self.drone_follow_timer.start(int(1000 / 5)) # 5 Hz for drone control as per upgrade_context
+        else:
+            self.drone_follow_button.setText("Drone Follow: Off")
+            self.log_message(f"Drone follow DISABLED.")
+            self.drone_follow_timer.stop()
+
+    def update_gimbal_follow(self):
+        if self.gimbal_follow_active and self.ht_backend.selected_person_id:
+            target_info = self.ht_backend.get_tracked_object_info(self.ht_backend.selected_person_id)
+            if target_info and 'box' in target_info:
+                x1, y1, x2, y2 = target_info['box']
+                center_x = (x1 + x2) / 2
+                center_y = (y1 + y2) / 2
+
+                # Convert to normalized coordinates (-1 to 1 or 0 to 1 depending on backend)
+                frame_width = self.video_thread.original_frame_width
+                frame_height = self.video_thread.original_frame_height
+
+                if frame_width == 0 or frame_height == 0: return
+
+                # Normalize to -1 to 1, where (0,0) is center
+                norm_center_x = (center_x / frame_width) * 2 - 1
+                norm_center_y = (center_y / frame_height) * 2 - 1
+
+                # Send command to gimbal control
+                # Assuming gimbal_control will handle the conversion to angular rates
+                self.gimbal_control.follow_target_in_frame(norm_center_x, norm_center_y)
+            else:
+                self.log_message(f"Selected person {self.ht_backend.selected_person_id} not currently tracked. Disabling gimbal follow.")
+                self.toggle_gimbal_follow() # Turn off gimbal follow if target lost
+
+    def update_drone_follow(self):
+        if self.drone_follow_active and self.ht_backend.selected_person_id:
+            # 1. Get selected person's bounding box
+            target_info = self.ht_backend.get_tracked_object_info(self.ht_backend.selected_person_id)
+            if not target_info or 'box' not in target_info:
+                self.log_message(f"Selected person {self.ht_backend.selected_person_id} not currently tracked. Disabling drone follow.")
+                self.toggle_drone_follow()
+                return
+
+            x1, y1, x2, y2 = target_info['box']
+            center_x = (x1 + x2) / 2
+            center_y = (y1 + y2) / 2
+
+            # 2. Get drone's latest telemetry (including GPS)
+            drone_telemetry = self.telemetry_listener.get_latest_telemetry()
+            drone_lat = drone_telemetry.get('latitude')
+            drone_lon = drone_telemetry.get('longitude')
+            drone_alt = drone_telemetry.get('altitude') # Relative altitude
+            drone_heading = drone_telemetry.get('heading', 0) # Yaw in radians, default to 0 if not available
+            drone_pitch = drone_telemetry.get('pitch', 0) # Pitch in radians, default to 0 if not available
+            drone_roll = drone_telemetry.get('roll', 0) # Roll in radians, default to 0 if not available
+
+            if drone_lat is None or drone_lon is None or drone_alt is None:
+                self.log_message("Drone GPS or Altitude not available. Cannot initiate drone follow.")
+                return
+
+            # 3. Get original frame dimensions
+            frame_width = self.video_thread.original_frame_width
+            frame_height = self.video_thread.original_frame_height
+
+            if frame_width == 0 or frame_height == 0:
+                self.log_message("Video frame dimensions not available. Cannot estimate target GPS.")
+                return
+            
+            # 4. Call position_tracker to convert screen coordinates to target GNSS
+            # This method will be implemented in position_tracker.py
+            target_lat, target_lon, target_alt = self.position_tracker.get_target_gnss(
+                screen_x=center_x,
+                screen_y=center_y,
+                frame_width=frame_width,
+                frame_height=frame_height,
+                drone_lat=drone_lat,
+                drone_lon=drone_lon,
+                drone_alt=drone_alt,
+                drone_heading=drone_heading,
+                drone_pitch=drone_pitch,
+                drone_roll=drone_roll
+            )
+
+            if target_lat is None or target_lon is None:
+                self.log_message("Could not estimate target GPS. Drone follow paused.")
+                return
+            
+            # 5. Call waypoint_deployer to send the follow command
+            # This method will be implemented in waypoint_deployer.py
+            # The 'default_distance_meters' and 'default_altitude_meters' from upgrade_context are used here.
+            self.waypoint_deployer.send_follow_command(
+                target_lat=target_lat,
+                target_lon=target_lon,
+                target_alt=target_alt, # Use estimated target_alt
+                follow_distance=15.0, # From upgrade_context
+                follow_altitude=10.0 # From upgrade_context
+            )
+            self.log_message(f"Sending drone follow command to target: Lat={target_lat:.6f}, Lon={target_lon:.6f}, Alt={target_alt:.2f}")
+        else:
+            if self.drone_follow_active: # If still active but no selected person
+                self.log_message("Drone follow active but no person selected or tracked. Pausing.")
+                self.drone_follow_timer.stop() # Pause timer
+                self.drone_follow_button.setText("Drone Follow: Paused")
 
     def send_gimbal_command(self, axis, direction):
         if axis == 'pan':
@@ -589,6 +834,16 @@ class DroneControlGUI(QMainWindow):
         # Send MAVLink command for gimbal control
         # Using pan for yaw and tilt for pitch
         self.mavlink_communicator.send_gimbal_command(pitch=self.tilt, roll=0, yaw=self.pan)
+
+    def send_mavlink_gimbal_follow_command(self, pitch_rate, yaw_rate):
+        # These are angular rates in rad/s from the gimbal control
+        # The MAVLink command needs degrees/second for some implementations or specific units.
+        # Check MAVLink spec for GIMBAL_MANAGER_SET_MANUAL_CONTROL and your drone's expected units.
+        # For now, we'll assume the MAVLinkCommunicator will handle unit conversion if necessary.
+        self.mavlink_communicator.send_gimbal_manager_set_manual_control(
+            pitch_rate=pitch_rate,
+            yaw_rate=yaw_rate
+        )
 
 
 

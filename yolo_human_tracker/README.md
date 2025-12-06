@@ -1,4 +1,4 @@
-# UAV Ground Control Station with Human Tracking
+# ARC_ENGIN with Human Tracking
 
 This is a Python-based Ground Control Station (GCS) for drones, featuring a dark-themed PyQt6 GUI, WebSocket communication, an interactive map display, and integrated AI-powered human tracking.
 
