@@ -83,7 +83,7 @@ class HumanTrackerBackend:
                 try:
                     encoding = pickle.loads(face_encoding_bytes)
                     # Explicitly check if encoding is not None and not empty
-                    if encoding is not None and len(encoding) > 0:
+                    if encoding is not None and encoding.size > 0:
                         if user_id not in self.known_faces_db:
                             # Add new user
                             self.known_faces_db[user_id] = {
