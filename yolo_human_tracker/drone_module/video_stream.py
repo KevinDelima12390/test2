@@ -17,13 +17,17 @@ class VideoStreamThread(QThread):
         self._run = True
         self.backend = backend
         self.stream_url = stream_url
-        logging.info(f"Attempting to open RTSP video stream with URL: {self.stream_url}") # Updated log
-        # Use cv2.CAP_FFMPEG for RTSP streams
-        self.cap = cv2.VideoCapture(self.stream_url, cv2.CAP_FFMPEG) # Changed to CAP_FFMPEG
-        # Add buffer size to help with network streams
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3) # Add this line
-        # Explicitly set the video codec to MJPEG
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG')) # Add this line
+        logging.info(f"Attempting to open video stream with URL/Index: {self.stream_url}")
+        if isinstance(self.stream_url, str):
+            # Use cv2.CAP_FFMPEG for RTSP streams
+            self.cap = cv2.VideoCapture(self.stream_url, cv2.CAP_FFMPEG)
+            # Add buffer size to help with network streams
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3) # Add this line
+            # Explicitly set the video codec to MJPEG
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcode(*'MJPG')) # Add this line
+        else:
+            # For local cameras, do not use CAP_FFMPEG
+            self.cap = cv2.VideoCapture(self.stream_url)
         
         if not self.cap.isOpened():
             self._run = False

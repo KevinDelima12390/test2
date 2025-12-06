@@ -12,6 +12,7 @@ import base64
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QTabWidget, QLabel, QPushButton, QInputDialog, 
                              QGroupBox, QTextEdit, QLineEdit, QComboBox) # Added QTextEdit
+from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtGui import QPalette, QColor, QImage, QPixmap
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QUrl, pyqtSlot, QTimer, QTimer
 from PyQt6.QtGui import QPixmap
@@ -31,10 +32,10 @@ from drone_module.video_stream import VideoStreamThread
 
 # IBIS Configuration
 IBIS_CONFIG = {
-    "BASE_URL": "http://127.0.0.1:8000",
-    "WEBSOCKET_URL": "ws://127.0.0.1:8000/ws/arc_engine",
-    "USERNAME": "your_username", # Replace with actual username for the tracker service
-    "PASSWORD": "your_password", # Replace with actual password
+    "BASE_URL": "http://3.25.229.21:8000",
+    "WEBSOCKET_URL": "ws://3.25.229.21:8000/ws/arc_engine",
+    "USERNAME": "Admin01", # Service account username for the tracker service
+    "PASSWORD": "Delima12390", # Service account password
     "TOKEN": None
 }
 
@@ -87,7 +88,7 @@ class DroneControlGUI(QMainWindow):
         self.flask_thread = threading.Thread(target=self._run_flask_server, daemon=True)
         self.flask_thread.start()
         time.sleep(1) # Give Flask a moment to start
-        webbrowser.open("http://127.0.0.1:5050") # Open map in browser
+        # webbrowser.open("http://127.0.0.1:5050") # Open map in browser
 
         # Backends
         self.ws_bridge = WebSocketBridge()
@@ -118,8 +119,9 @@ class DroneControlGUI(QMainWindow):
         )
         self.telemetry_listener.start() # Start the telemetry listener thread
 
-        # Load IBIS users for facial recognition via API
         self.load_ibis_users_via_api()
+
+
 
 
     def _run_flask_server(self):
@@ -137,9 +139,9 @@ class DroneControlGUI(QMainWindow):
         map_group = QGroupBox("Map View (External Browser)")
         left_panel.addWidget(map_group)
         map_layout = QVBoxLayout(map_group)
-        self.map_status_label = QLabel("Map opened in your default web browser.")
-        self.map_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        map_layout.addWidget(self.map_status_label)
+        self.map_view = QWebEngineView()
+        self.map_view.setUrl(QUrl("http://127.0.0.1:5050"))
+        map_layout.addWidget(self.map_view)
 
         # Waypoint Deployer
         waypoint_group = QGroupBox("Mission Waypoints")
@@ -285,7 +287,7 @@ class DroneControlGUI(QMainWindow):
     def start_video_stream(self):
         try:
             self.log_message("Starting RTSP video stream...")
-            rtsp_url = "rtsp://192.168.100.224:8554/unicast"
+            rtsp_url = 0 # Changed to use laptop camera
             self.video_thread = VideoStreamThread(self.ht_backend, rtsp_url, self)
             self.video_thread.change_pixmap_signal.connect(self.update_image)
             self.video_thread.update_info_signal.connect(self.update_ht_info_panel)
@@ -577,9 +579,6 @@ class DroneControlGUI(QMainWindow):
             else:
                 self.log_message("Save New Face Error: Selected face data not found.")
 
-
-
-
     def send_gimbal_command(self, axis, direction):
         if axis == 'pan':
             self.pan += direction
@@ -589,6 +588,8 @@ class DroneControlGUI(QMainWindow):
         # Send MAVLink command for gimbal control
         # Using pan for yaw and tilt for pitch
         self.mavlink_communicator.send_gimbal_command(pitch=self.tilt, roll=0, yaw=self.pan)
+
+
 
     def update_telemetry_dashboard(self, message):
         # Store last known values

@@ -8,9 +8,13 @@ class DroneTelemetryListener(threading.Thread):
         self.daemon = True  # Daemonize thread to exit when main program exits
         self.telemetry_callback = telemetry_callback
         self._stop_event = threading.Event()
+        self.latest_telemetry = {}
 
     def stop(self):
         self._stop_event.set()
+
+    def get_latest_telemetry(self):
+        return self.latest_telemetry.copy()
 
     def run(self):
         logging.info("Starting MAVLink telemetry listener on udpin:0.0.0.0:14550")
@@ -65,9 +69,10 @@ class DroneTelemetryListener(threading.Thread):
 
             if self.telemetry_callback:
                 self.telemetry_callback(processed_data)
-            else:
-                print(f"Telemetry - {processed_data}")
-
+            
+            # Update the latest telemetry data
+            self.latest_telemetry.update(processed_data)
+            
         logging.info("MAVLink telemetry listener stopped.")
 
 if __name__ == '__main__':
