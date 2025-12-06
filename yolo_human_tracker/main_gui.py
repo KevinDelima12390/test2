@@ -402,6 +402,7 @@ class DroneControlGUI(QMainWindow):
 
     def log_message(self, message):
         self.system_log.append(f"[{time.strftime('%H:%M:%S')}] {message}")
+        self.system_log.verticalScrollBar().setValue(self.system_log.verticalScrollBar().maximum())
 
     def send_mavlink_console_command(self):
         command = self.mavlink_console_input.text()
@@ -424,7 +425,7 @@ class DroneControlGUI(QMainWindow):
                 "password": IBIS_CONFIG["PASSWORD"]
             }
             login_url = f"{IBIS_CONFIG['BASE_URL']}/login"
-            response = requests.post(login_url, data=login_data)
+            response = requests.post(login_url, json=login_data)
 
             if response.status_code != 200:
                 self.log_message(f"IBIS API Error: Failed to login. Status: {response.status_code}, Detail: {response.text}")
