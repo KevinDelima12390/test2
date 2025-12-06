@@ -82,11 +82,6 @@ class HumanTrackerBackend:
             if user_id and name and face_encoding_bytes:
                 try:
                     encoding = pickle.loads(face_encoding_bytes)
-                    print(f"DEBUG: Type of encoding after pickle.loads: {type(encoding)}")
-                    if isinstance(encoding, np.ndarray):
-                        print(f"DEBUG: Shape of encoding: {encoding.shape}, Size: {encoding.size}")
-                    else:
-                        print(f"DEBUG: Encoding is not a numpy.ndarray. Value: {encoding}")
 
                     # Ensure encoding is a numpy array, not empty, and has a valid shape
                     if isinstance(encoding, np.ndarray) and encoding.size > 0 and encoding.shape[0] > 0:
@@ -103,8 +98,8 @@ class HumanTrackerBackend:
                             # Check if the encoding is distinct enough before adding
                             is_distinct = True
                             for existing_encoding in self.known_faces_db[user_id]['encodings']:
-                                # Ensure existing_encoding is a numpy array before comparison
-                                if isinstance(existing_encoding, np.ndarray) and existing_encoding.size > 0 and face_recognition.face_distance([existing_encoding], encoding)[0] < self.MIN_DISTINCT_FACE_DISTANCE:
+                                # Ensure existing_encoding is a numpy array before comparison and has dimensions
+                                if isinstance(existing_encoding, np.ndarray) and existing_encoding.size > 0 and existing_encoding.ndim > 0 and face_recognition.face_distance([existing_encoding], encoding)[0] < self.MIN_DISTINCT_FACE_DISTANCE:
                                     is_distinct = False
                                     break
                             if is_distinct:
