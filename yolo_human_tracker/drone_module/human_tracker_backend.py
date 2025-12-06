@@ -82,8 +82,10 @@ class HumanTrackerBackend:
             if user_id and name and face_encoding_bytes:
                 try:
                     encoding = pickle.loads(face_encoding_bytes)
-                    # Explicitly check if encoding is not None and not empty
-                    if encoding is not None and encoding.size > 0:
+                    print(f"DEBUG: Type of encoding after pickle.loads: {type(encoding)}") # Debug print
+
+                    # Ensure encoding is a numpy array and not empty
+                    if isinstance(encoding, np.ndarray) and encoding.size > 0:
                         if user_id not in self.known_faces_db:
                             # Add new user
                             self.known_faces_db[user_id] = {
@@ -97,7 +99,8 @@ class HumanTrackerBackend:
                             # Check if the encoding is distinct enough before adding
                             is_distinct = True
                             for existing_encoding in self.known_faces_db[user_id]['encodings']:
-                                if face_recognition.face_distance([existing_encoding], encoding)[0] < self.MIN_DISTINCT_FACE_DISTANCE:
+                                # Ensure existing_encoding is a numpy array before comparison
+                                if isinstance(existing_encoding, np.ndarray) and face_recognition.face_distance([existing_encoding], encoding)[0] < self.MIN_DISTINCT_FACE_DISTANCE:
                                     is_distinct = False
                                     break
                             if is_distinct:
@@ -106,7 +109,7 @@ class HumanTrackerBackend:
                             else:
                                 print(f"Skipped adding duplicate encoding for user {name} ({user_id}).")
                     else:
-                        print(f"Skipped importing user {name} ({user_id}) from IBIS: Face encoding is empty or None.")
+                        print(f"Skipped importing user {name} ({user_id}) from IBIS: Face encoding is not a numpy array or is empty.")
 
                 except Exception as e:
                     print(f"Error importing face data for {user_id} from IBIS: {e}")
