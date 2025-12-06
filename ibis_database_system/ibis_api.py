@@ -80,6 +80,8 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+import base64
+
 # Dependency
 def get_db():
     db = SessionLocal()
@@ -225,7 +227,7 @@ async def websocket_endpoint(websocket: WebSocket):
 class UserWithFaceResponse(BaseModel):
     user_id: str
     name: str
-    face_encoding: bytes  # Keep as bytes, will be base64 encoded by FastAPI
+    face_encoding: str  # Changed to str to hold base64 encoded bytes
     image_path: str
 
     class Config:
@@ -247,6 +249,9 @@ async def get_users_with_faces(
     for user in users:
         if isinstance(user.face_encoding, np.ndarray):
              user.face_encoding = pickle.dumps(user.face_encoding)
+        # Base64 encode the pickled face_encoding bytes to a string
+        if user.face_encoding: # Check if encoding exists
+            user.face_encoding = base64.b64encode(user.face_encoding).decode('utf-8')
     return users
 
 @app.get("/events/{user_id}", response_model=List[EmergencyEventResponse])
