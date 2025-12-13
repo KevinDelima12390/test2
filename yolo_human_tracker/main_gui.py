@@ -34,6 +34,7 @@ from drone_module.video_stream import VideoStreamThread
 from drone_module.position_tracker import PositionTracker # Import PositionTracker
 from drone_module.attitude_indicator import AttitudeIndicatorWidget
 from drone_module.compass_widget import CompassWidget
+from drone_module.pid_controller import PIDController # Import PIDController
 
 # IBIS Configuration
 IBIS_CONFIG = {
@@ -94,6 +95,13 @@ class DroneControlGUI(QMainWindow):
         self.drone_follow_active = False # Initialize drone follow state
         self.drone_follow_timer = QTimer(self)
         self.drone_follow_timer.timeout.connect(self.update_drone_follow)
+
+        self.video_thread = None
+
+        # PID controllers for gimbal control
+        # Tuned values for Kp, Ki, Kd will depend on the drone and gimbal
+        self.gimbal_pitch_pid = PIDController(kp=0.05, ki=0.001, kd=0.01, setpoint=0) # Setpoint is center (0 error)
+        self.gimbal_yaw_pid = PIDController(kp=0.05, ki=0.001, kd=0.01, setpoint=0) # Setpoint is center (0 error)
 
         self.set_dark_theme()
 
@@ -278,7 +286,6 @@ class DroneControlGUI(QMainWindow):
         drone_controls_layout = QHBoxLayout(drone_controls_group)
         self.gimbal_control = GimbalControl()
         self.gimbal_control.gimbal_command.connect(self.send_gimbal_command)
-        self.gimbal_control.follow_gimbal_command.connect(self.send_mavlink_gimbal_follow_command)
         drone_controls_layout.addWidget(self.gimbal_control)
 
         arm_button = QPushButton("Arm")
@@ -333,7 +340,7 @@ class DroneControlGUI(QMainWindow):
     def start_video_stream(self):
         try:
             self.log_message("Starting RTSP video stream...")
-            rtsp_url = 0 # Changed to use laptop camera
+            rtsp_url = 0
             self.video_thread = VideoStreamThread(self.ht_backend, rtsp_url, self)
             self.video_thread.change_pixmap_signal.connect(self.update_image)
             self.video_thread.update_info_signal.connect(self.update_ht_info_panel)
@@ -579,6 +586,9 @@ class DroneControlGUI(QMainWindow):
         self.face_count_label.setText(f"Faces: {count}")
 
     def handle_video_click(self, x, y):
+        if not self.video_thread:
+            self.log_message("Video thread not initialized. Cannot handle video click.")
+            return
         # Get dimensions of the QLabel and the original frame
         label_width = self.video_label.width()
         label_height = self.video_label.height()
@@ -738,22 +748,39 @@ class DroneControlGUI(QMainWindow):
                 center_x = (x1 + x2) / 2
                 center_y = (y1 + y2) / 2
 
-                # Convert to normalized coordinates (-1 to 1 or 0 to 1 depending on backend)
+                # Convert to normalized coordinates (-1 to 1, where 0 is center)
                 frame_width = self.video_thread.original_frame_width
                 frame_height = self.video_thread.original_frame_height
 
                 if frame_width == 0 or frame_height == 0: return
 
                 # Normalize to -1 to 1, where (0,0) is center
-                norm_center_x = (center_x / frame_width) * 2 - 1
-                norm_center_y = (center_y / frame_height) * 2 - 1
+                norm_center_x = (center_x / frame_width) * 2 - 1 # Error in X direction
+                norm_center_y = (center_y / frame_height) * 2 - 1 # Error in Y direction
 
-                # Send command to gimbal control
-                # Assuming gimbal_control will handle the conversion to angular rates
-                self.gimbal_control.follow_target_in_frame(norm_center_x, norm_center_y)
+                # Calculate dt for PID controllers (assuming timer is 30Hz)
+                dt = 1.0 / 30.0
+
+                # Update PID controllers
+                delta_yaw = self.gimbal_yaw_pid.update(norm_center_x, dt)
+                delta_pitch = self.gimbal_pitch_pid.update(norm_center_y, dt)
+
+                self.pan += delta_yaw
+                self.tilt += delta_pitch
+
+                # Clamp angles
+                self.pan = max(-180, min(180, self.pan))
+                self.tilt = max(-90, min(0, self.tilt))
+                
+                pitch_angle_cdeg = int(self.tilt * 100)
+                yaw_angle_cdeg = int(self.pan * 100)
+
+                self.mavlink_communicator.send_gimbal_command(pitch=pitch_angle_cdeg, roll=0, yaw=yaw_angle_cdeg)
             else:
-                self.log_message(f"Selected person {self.ht_backend.selected_person_id} not currently tracked. Disabling gimbal follow.")
+                self.log_message(f"Selected person {self.ht_backend.selected_person_id} not currently tracked. Disabling gimbal follow and resetting PID.")
                 self.toggle_gimbal_follow() # Turn off gimbal follow if target lost
+                self.gimbal_pitch_pid.reset()
+                self.gimbal_yaw_pid.reset()
 
     def update_drone_follow(self):
         if self.drone_follow_active and self.ht_backend.selected_person_id:
@@ -826,24 +853,34 @@ class DroneControlGUI(QMainWindow):
                 self.drone_follow_button.setText("Drone Follow: Paused")
 
     def send_gimbal_command(self, axis, direction):
-        if axis == 'pan':
-            self.pan += direction
-        elif axis == 'tilt':
-            self.tilt += direction
-        
-        # Send MAVLink command for gimbal control
-        # Using pan for yaw and tilt for pitch
-        self.mavlink_communicator.send_gimbal_command(pitch=self.tilt, roll=0, yaw=self.pan)
+        # Define a step size for angular movement in degrees
+        step_deg = 1 # 1 degree per click/command
 
-    def send_mavlink_gimbal_follow_command(self, pitch_rate, yaw_rate):
-        # These are angular rates in rad/s from the gimbal control
-        # The MAVLink command needs degrees/second for some implementations or specific units.
-        # Check MAVLink spec for GIMBAL_MANAGER_SET_MANUAL_CONTROL and your drone's expected units.
-        # For now, we'll assume the MAVLinkCommunicator will handle unit conversion if necessary.
-        self.mavlink_communicator.send_gimbal_manager_set_manual_control(
-            pitch_rate=pitch_rate,
-            yaw_rate=yaw_rate
-        )
+        if axis == 'pan':
+            self.pan += direction * step_deg
+            # Clamp pan angle to a reasonable range, e.g., -180 to +180 degrees
+            self.pan = max(-180, min(180, self.pan))
+        elif axis == 'tilt':
+            self.tilt += direction * step_deg
+            # Clamp tilt angle to a reasonable range, e.g., -90 (down) to 0 (horizon) degrees
+            self.tilt = max(-90, min(0, self.tilt))
+        
+        # Convert to centi-degrees for MAVLink command
+        pitch_angle_cdeg = int(self.tilt * 100)
+        yaw_angle_cdeg = int(self.pan * 100)
+
+        # Send MAVLink command for gimbal control using angles
+        self.mavlink_communicator.send_gimbal_command(pitch=pitch_angle_cdeg, roll=0, yaw=yaw_angle_cdeg)
+
+    # def send_mavlink_gimbal_follow_command(self, pitch_rate, yaw_rate):
+    #     # These are angular rates in rad/s from the gimbal control
+    #     # The MAVLink command needs degrees/second for some implementations or specific units.
+    #     # Check MAVLink spec for GIMBAL_MANAGER_SET_MANUAL_CONTROL and your drone's expected units.
+    #     # For now, we'll assume the MAVLinkCommunicator will handle unit conversion if necessary.
+    #     self.mavlink_communicator.send_gimbal_manager_set_manual_control(
+    #         pitch_rate=pitch_rate,
+    #         yaw_rate=yaw_rate
+    #     )
 
 
 
@@ -963,7 +1000,7 @@ if __name__ == "__main__":
 
     gui = DroneControlGUI()
     gui.show()
-    gui.start_server_task()
+    # gui.start_server_task()
 
     with loop:
         loop.run_forever()

@@ -17,10 +17,10 @@ class DroneTelemetryListener(threading.Thread):
         return self.latest_telemetry.copy()
 
     def run(self):
-        logging.info("Starting MAVLink telemetry listener on udpin:0.0.0.0:14550")
+        logging.info("Starting MAVLink telemetry listener on udp:127.0.0.1:14552")
         try:
-            # Listen for incoming UDP messages on port 14550
-            mav_conn = mavutil.mavlink_connection('udpin:0.0.0.0:14550')
+            # Listen for incoming UDP messages on port 14552
+            mav_conn = mavutil.mavlink_connection('udp:127.0.0.1:14552')
         except Exception as e:
             logging.error(f"Failed to start MAVLink listener: {e}")
             return
