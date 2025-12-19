@@ -1,82 +1,76 @@
-# ARC_ENGIN with Human Tracking
+# Human Tracking System v1.4
 
-This is a Python-based Ground Control Station (GCS) for drones, featuring a dark-themed PyQt6 GUI, WebSocket communication, an interactive map display, and integrated AI-powered human tracking.
+This document provides an overview of the Human Tracking System, a Ground Control Station (GCS) for professional drone operations.
 
-## Features
+**Version:** 1.4
+**Date:** 2024-07-26
 
-- **Integrated Control:** A single interface for both drone control and human tracking.
-- **Live Video Feed:** Real-time video from a webcam, with AI-powered human detection and tracking.
-- **Facial Recognition:** Identify and name tracked individuals.
-- **Drone Telemetry:** Real-time display of drone telemetry data via WebSocket.
-- **Interactive Map:** Live drone tracking and waypoint management on an interactive Leaflet map.
-- **Gimbal Control:** Joystick-style control for the drone's gimbal.
-- **Waypoint Management:** Add, edit, and delete waypoints, and fly missions (simulated).
+## Key Features
 
-## Installation
+- **Unified Interface:** A single, dark-themed PyQt6 GUI for comprehensive drone control, live video monitoring, and human tracking.
+- **Manual Gimbal Control:** Fine-tune the camera's view with joystick-style gimbal control.
+- **Real-Time Telemetry & Mapping:** Displays live drone telemetry on an interactive map, including drone position, waypoints, and mission routes.
+- **Facial Recognition:** Identifies and labels known individuals in the video feed.
+- **External System Integration:**
+  - **IBIS API:** Connects to the IBIS system to preload user data, including facial recognition profiles.
+  - **WebSocket Alerts:** Listens for real-time emergency alerts to automate mission tasking.
 
-1. **Clone the repository:**
-   ```bash
-   git clone <repository-url>
-   cd <repository-directory>
-   ```
+---
 
-2. **Install the dependencies:**
-   Make sure you have the latest `requirements.txt` and run:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## 1. System Architecture
 
-## How to Run
+The system consists of three main components:
 
-1. **Start the application:**
-   ```bash
-   python main_gui.py
-   ```
+1.  **Main GUI (`main_gui.py`):** The central application built with PyQt6. It integrates all modules into a user-friendly interface.
+2.  **Backend (`human_tracker_backend.py`):** Powers the human detection, tracking, and facial recognition features using `torch` and `ultralytics`.
+3.  **Mavlink Bridge (`mavlink_communicator.py`):** Manages communication with the drone via the MAVLink protocol, translating GUI commands into drone actions and relaying telemetry.
 
-The application will start, and you will be prompted to select a camera for the human tracking system.
+---
 
-## Connecting a Drone
+## 2. Core Functionalities
 
-To see live drone telemetry, you need to connect a drone or a drone simulator that sends telemetry data in the expected JSON format over a WebSocket connection to `ws://localhost:8765`.
+### 2.1. IBIS Integration
 
-### Message Format
+The GCS is designed to work seamlessly with the **IBIS (Integrated Biometric Identification System)**.
 
-The JSON packets sent to the GUI should follow this format:
+- **User Pre-loading:** On startup, the system connects to the IBIS REST API to fetch a list of registered users and their facial recognition encodings. This allows the system to immediately identify known individuals.
+- **Emergency Alert System:** The GCS listens on a WebSocket for `emergency` messages broadcast from the IBIS server. When an alert is received, it automatically generates a waypoint on the map at the specified coordinates, allowing the operator to dispatch the drone to the location with a single click.
 
-**Telemetry (Drone → GUI):**
-```json
-{
-  "type": "telemetry",
-  "drone_id": "AERIS-01",
-  "timestamp": 1699999999,
-  "telemetry": {
-    "lat": 3.12345,
-    "lon": 101.65432,
-    "altitude_m": 82.5,
-    "speed_kmh": 18.2,
-    "battery_pct": 78,
-    "heading_deg": 237,
-    "flight_time_s": 320
-  },
-  "gimbal": { "pan_deg": 10, "tilt_deg": -5 }
-}
-```
+---
 
-**Commands (GUI → Drone):**
-The GUI sends commands in this format:
-```json
-{
-  "type":"command",
-  "command":"gimbal",
-  "drone_id":"AERIS-01",
-  "payload": {"pan_deg": 15, "tilt_deg": -10}
-}
-```
+## 3. Setup and Installation
 
-### MAVLink Integration
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository-url>
+    cd <repository-directory>
+    ```
 
-To connect a real drone using MAVLink, you will need to create a MAVLink-to-WebSocket bridge. This script will:
-1.  Connect to your drone via MAVLink.
-2.  Convert MAVLink messages to the JSON format expected by the GUI.
-3.  Forward the JSON packets to the GUI over WebSocket.
-4.  Listen for commands from the GUI, convert them to MAVLink commands, and send them to the drone.
+2.  **Install dependencies:**
+    Ensure you have Python 3.10+ and pip.
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+3.  **Run the application:**
+    ```bash
+    python main_gui.py
+    ```
+
+**Note on Models:** This application requires the `yolov9c.pt` and `face_detection_yunet_2023mar.onnx` models to be present in the correct locations (`yolov9c.pt` in the root and `face_detection_yunet_2023mar.onnx` in the `models` directory). These files are included in the repository.
+
+---
+
+## 4. API and Communication
+
+### 4.1. IBIS API Credentials
+
+The system uses the following hardcoded credentials to access the IBIS API.
+- **User ID:** `Admin01`
+- **Password:** `Delima12390`
+
+### 4.2. WebSocket Endpoint
+
+- **IBIS Alerts:** `ws://3.25.229.21:8000/ws/arc_engine`
+
+This endpoint is used by the server to broadcast real-time messages, such as emergency alerts, which are then processed by the GCS.

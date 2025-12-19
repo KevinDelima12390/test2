@@ -19,8 +19,8 @@ class HumanTrackerBackend:
             self.device = 'mps'
         print(f"Using device for YOLO: {self.device}")
 
-        self.yolo_model_path = 'yolov9e.pt'
-        self.tensorrt_engine_path = 'yolov9e.engine'
+        self.yolo_model_path = 'yolov9c.pt'
+        self.tensorrt_engine_path = 'yolov9c.engine'
 
         # Attempt to load TensorRT engine first for maximum performance on NVIDIA GPUs
         if self.device == 'cuda' and os.path.exists(self.tensorrt_engine_path):
@@ -39,14 +39,14 @@ class HumanTrackerBackend:
         # If you have an NVIDIA GPU and TensorRT installed, you can compile the .pt model
         # to a TensorRT engine for optimal performance.
         # Steps:
-        # 1. Ensure you have the 'yolov9e.pt' model file in the project root.
+        # 1. Ensure you have the 'yolov9c.pt' model file in the project root.
         # 2. Run the following command in a Python environment with ultralytics, torch, and tensorrt installed:
         #    from ultralytics import YOLO
-        #    model = YOLO('yolov9e.pt')
+        #    model = YOLO('yolov9c.pt')
         #    model.export(format='engine', device=0, imgsz=640, half=True, workspace=4)
         #    (Adjust device, imgsz, half, workspace as needed. imgsz is usually square, e.g., 640 or 1280)
-        #    This will generate 'yolov9e.engine' in the project root.
-        # 3. Place 'yolov9e.engine' in the project root alongside 'yolov9e.pt'.
+        #    This will generate 'yolov9c.engine' in the project root.
+        # 3. Place 'yolov9c.engine' in the project root alongside 'yolov9c.pt'.
         # 4. The system will then automatically attempt to load the .engine file if 'cuda' device is available.
         # ------------------------------------------------------------------
 

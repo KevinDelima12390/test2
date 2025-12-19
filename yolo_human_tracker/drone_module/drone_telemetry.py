@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from pymavlink import mavutil
 
 class DroneTelemetryListener(threading.Thread):
@@ -9,6 +10,7 @@ class DroneTelemetryListener(threading.Thread):
         self.telemetry_callback = telemetry_callback
         self._stop_event = threading.Event()
         self.latest_telemetry = {}
+        self.mav_conn = None
 
     def stop(self):
         self._stop_event.set()
@@ -17,19 +19,22 @@ class DroneTelemetryListener(threading.Thread):
         return self.latest_telemetry.copy()
 
     def run(self):
-        logging.info("Starting MAVLink telemetry listener on udp:127.0.0.1:14552")
-        try:
-            # Listen for incoming UDP messages on port 14552
-            mav_conn = mavutil.mavlink_connection('udp:127.0.0.1:14552')
-        except Exception as e:
-            logging.error(f"Failed to start MAVLink listener: {e}")
-            return
-
-        logging.info("MAVLink listener started. Waiting for messages...")
+        logging.info("Starting MAVLink telemetry listener...")
         
         while not self._stop_event.is_set():
+            if self.mav_conn is None:
+                try:
+                    logging.info("Attempting to connect to MAVLink on udp:127.0.0.1:14552")
+                    self.mav_conn = mavutil.mavlink_connection('udp:127.0.0.1:14552')
+                    logging.info("MAVLink connection established.")
+                except Exception as e:
+                    logging.error(f"Failed to start MAVLink listener: {e}")
+                    self.mav_conn = None
+                    time.sleep(5) # Wait before retrying
+                    continue
+
             # Wait for a new message
-            msg = mav_conn.recv_match(type=['GLOBAL_POSITION_INT', 'SYS_STATUS', 'RC_CHANNELS', 'HEARTBEAT', 'ATTITUDE'], blocking=True, timeout=1.0)
+            msg = self.mav_conn.recv_match(type=['GLOBAL_POSITION_INT', 'SYS_STATUS', 'RC_CHANNELS', 'HEARTBEAT', 'ATTITUDE'], blocking=True, timeout=1.0)
             if msg is None:
                 continue
 

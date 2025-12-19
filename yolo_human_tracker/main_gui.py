@@ -28,13 +28,10 @@ from drone_module.mavlink_communicator import MavlinkCommunicator
 from drone_module.gimbal_control import GimbalControl
 from drone_module.drone_telemetry import DroneTelemetryListener
 # from map_widget import MapWidget # Removed MapWidget import
-from drone_module.waypoint_deployer import WaypointDeployer
-from drone_module.human_tracker_backend import HumanTrackerBackend
+from drone_module.tracker_backend import HumanTrackerBackend
 from drone_module.video_stream import VideoStreamThread
-from drone_module.position_tracker import PositionTracker # Import PositionTracker
 from drone_module.attitude_indicator import AttitudeIndicatorWidget
 from drone_module.compass_widget import CompassWidget
-from drone_module.pid_controller import PIDController # Import PIDController
 
 # IBIS Configuration
 IBIS_CONFIG = {
@@ -46,7 +43,8 @@ IBIS_CONFIG = {
 }
 
 # Import the Flask app from map_server.py
-from map_server import app as flask_app, coords as map_coords
+# Import the Flask app from map_server.py
+# from map_server import app as flask_app, coords as map_coords
 
 def start_async_loop(loop):
     asyncio.set_event_loop(loop)
@@ -88,20 +86,7 @@ class DroneControlGUI(QMainWindow):
         self.last_signal_strength = 0
 
         self.selected_person_id = None # Initialize selected person ID
-        self.gimbal_follow_active = False # Initialize gimbal follow state
-        self.gimbal_follow_timer = QTimer(self)
-        self.gimbal_follow_timer.timeout.connect(self.update_gimbal_follow)
-
-        self.drone_follow_active = False # Initialize drone follow state
-        self.drone_follow_timer = QTimer(self)
-        self.drone_follow_timer.timeout.connect(self.update_drone_follow)
-
         self.video_thread = None
-
-        # PID controllers for gimbal control
-        # Tuned values for Kp, Ki, Kd will depend on the drone and gimbal
-        self.gimbal_pitch_pid = PIDController(kp=0.05, ki=0.001, kd=0.01, setpoint=0) # Setpoint is center (0 error)
-        self.gimbal_yaw_pid = PIDController(kp=0.05, ki=0.001, kd=0.01, setpoint=0) # Setpoint is center (0 error)
 
         self.set_dark_theme()
 
@@ -115,9 +100,9 @@ class DroneControlGUI(QMainWindow):
         self.async_thread.start()
 
         # Start Flask server in a separate thread
-        self.flask_thread = threading.Thread(target=self._run_flask_server, daemon=True)
-        self.flask_thread.start()
-        time.sleep(1) # Give Flask a moment to start
+        # self.flask_thread = threading.Thread(target=self._run_flask_server, daemon=True)
+        # self.flask_thread.start()
+        # time.sleep(1) # Give Flask a moment to start
         # webbrowser.open("http://127.0.0.1:5050") # Open map in browser
 
         # Backends
@@ -125,8 +110,6 @@ class DroneControlGUI(QMainWindow):
         self.ht_backend = HumanTrackerBackend()
         self.telemetry_listener = DroneTelemetryListener(telemetry_callback=self.queue_telemetry_message)
         self.mavlink_communicator = MavlinkCommunicator()
-        self.position_tracker = PositionTracker(self.mavlink_communicator) # Initialize PositionTracker
-        self.waypoint_deployer = WaypointDeployer(self.mavlink_communicator) # Initialize WaypointDeployer with mavlink_communicator
 
         self.attitude_indicator = AttitudeIndicatorWidget(self)
         self.compass_widget = CompassWidget(self)
@@ -148,16 +131,14 @@ class DroneControlGUI(QMainWindow):
         self.setup_camera()
 
         # Start background services
-        asyncio.run_coroutine_threadsafe(
-            self.ws_bridge.connect_to_ibis_ws(IBIS_CONFIG["WEBSOCKET_URL"], self.ws_bridge.ibis_message_callback),
-            self.async_loop
-        )
-        self.telemetry_listener.start() # Start the telemetry listener thread
+        # asyncio.run_coroutine_threadsafe(
+        #     self.ws_bridge.connect_to_ibis_ws(IBIS_CONFIG["WEBSOCKET_URL"], self.ws_bridge.ibis_message_callback),
+        #     self.async_loop
+        # )
+        
+        self.telemetry_listener.start()
 
-        self.load_ibis_users_via_api()
-
-
-
+        # self.load_ibis_users_via_api()
 
     def _run_flask_server(self):
         flask_app.run(host="0.0.0.0", port=5050, debug=False)
@@ -182,9 +163,7 @@ class DroneControlGUI(QMainWindow):
         waypoint_group = QGroupBox("Mission Waypoints")
         left_panel.addWidget(waypoint_group)
         waypoint_layout = QVBoxLayout(waypoint_group)
-        self.waypoint_deployer.start_mission.connect(self.start_mission_animation)
-        waypoint_layout.addWidget(self.waypoint_deployer)
-
+        
         self.clear_waypoints_button = QPushButton("Clear Map Waypoints")
         self.clear_waypoints_button.clicked.connect(self.clear_map_waypoints)
         waypoint_layout.addWidget(self.clear_waypoints_button)
@@ -317,18 +296,10 @@ class DroneControlGUI(QMainWindow):
         self.edit_name_button = QPushButton("Edit Name")
         self.edit_name_button.clicked.connect(self.edit_name)
         
-        self.gimbal_follow_button = QPushButton("Gimbal Follow")
-        self.gimbal_follow_button.clicked.connect(self.toggle_gimbal_follow)
-
-        self.drone_follow_button = QPushButton("Drone Follow")
-        self.drone_follow_button.clicked.connect(self.toggle_drone_follow)
-
         ht_controls_layout.addWidget(self.fr_toggle_button)
         ht_controls_layout.addWidget(self.ll_toggle_button)
         ht_controls_layout.addWidget(self.name_button)
         ht_controls_layout.addWidget(self.edit_name_button)
-        ht_controls_layout.addWidget(self.gimbal_follow_button)
-        ht_controls_layout.addWidget(self.drone_follow_button)
 
         self.save_new_face_button = QPushButton("Save New Face")
         self.save_new_face_button.clicked.connect(self.save_new_face_dialog)
@@ -339,7 +310,7 @@ class DroneControlGUI(QMainWindow):
 
     def start_video_stream(self):
         try:
-            self.log_message("Starting RTSP video stream...")
+            self.log_message("Starting webcam video stream...")
             rtsp_url = 0
             self.video_thread = VideoStreamThread(self.ht_backend, rtsp_url, self)
             self.video_thread.change_pixmap_signal.connect(self.update_image)
@@ -463,7 +434,6 @@ class DroneControlGUI(QMainWindow):
             if user_id and lat is not None and lon is not None:
                 self.log_message(f"Emergency Alert: {user_id} at Lat: {lat}, Lon: {lon}")
                 waypoint_str = f"{lat},{lon},{user_id}" # Store user_id with waypoint
-                self.waypoint_deployer.add_waypoint(waypoint_str)
                 # Send waypoint to Flask map server
                 try:
                     requests.get(f"http://127.0.0.1:5050/add_waypoint/{lat}/{lon}")
@@ -706,152 +676,6 @@ class DroneControlGUI(QMainWindow):
             else:
                 self.log_message("Save New Face Error: Selected face data not found.")
 
-    def toggle_gimbal_follow(self):
-        if not self.ht_backend.selected_person_id:
-            self.log_message("Please select a person to enable gimbal follow.")
-            return
-
-        self.gimbal_follow_active = not self.gimbal_follow_active
-        if self.gimbal_follow_active:
-            self.gimbal_follow_button.setText("Gimbal Follow: On")
-            self.log_message(f"Gimbal follow ENABLED for {self.ht_backend.selected_person_id}.")
-            self.gimbal_follow_timer.start(int(1000 / 30)) # 30 Hz for gimbal control
-        else:
-            self.gimbal_follow_button.setText("Gimbal Follow: Off")
-            self.log_message(f"Gimbal follow DISABLED.")
-            self.gimbal_follow_timer.stop()
-
-    def toggle_drone_follow(self):
-        if not self.ht_backend.selected_person_id:
-            self.log_message("Please select a person to enable drone follow.")
-            return
-        
-        # If gimbal follow is active, disable it first.
-        if self.gimbal_follow_active:
-            self.toggle_gimbal_follow()
-
-        self.drone_follow_active = not self.drone_follow_active
-        if self.drone_follow_active:
-            self.drone_follow_button.setText("Drone Follow: On")
-            self.log_message(f"Drone follow ENABLED for {self.ht_backend.selected_person_id}.")
-            self.drone_follow_timer.start(int(1000 / 5)) # 5 Hz for drone control as per upgrade_context
-        else:
-            self.drone_follow_button.setText("Drone Follow: Off")
-            self.log_message(f"Drone follow DISABLED.")
-            self.drone_follow_timer.stop()
-
-    def update_gimbal_follow(self):
-        if self.gimbal_follow_active and self.ht_backend.selected_person_id:
-            target_info = self.ht_backend.get_tracked_object_info(self.ht_backend.selected_person_id)
-            if target_info and 'box' in target_info:
-                x1, y1, x2, y2 = target_info['box']
-                center_x = (x1 + x2) / 2
-                center_y = (y1 + y2) / 2
-
-                # Convert to normalized coordinates (-1 to 1, where 0 is center)
-                frame_width = self.video_thread.original_frame_width
-                frame_height = self.video_thread.original_frame_height
-
-                if frame_width == 0 or frame_height == 0: return
-
-                # Normalize to -1 to 1, where (0,0) is center
-                norm_center_x = (center_x / frame_width) * 2 - 1 # Error in X direction
-                norm_center_y = (center_y / frame_height) * 2 - 1 # Error in Y direction
-
-                # Calculate dt for PID controllers (assuming timer is 30Hz)
-                dt = 1.0 / 30.0
-
-                # Update PID controllers
-                delta_yaw = self.gimbal_yaw_pid.update(norm_center_x, dt)
-                delta_pitch = self.gimbal_pitch_pid.update(norm_center_y, dt)
-
-                self.pan += delta_yaw
-                self.tilt += delta_pitch
-
-                # Clamp angles
-                self.pan = max(-180, min(180, self.pan))
-                self.tilt = max(-90, min(0, self.tilt))
-                
-                pitch_angle_cdeg = int(self.tilt * 100)
-                yaw_angle_cdeg = int(self.pan * 100)
-
-                self.mavlink_communicator.send_gimbal_command(pitch=pitch_angle_cdeg, roll=0, yaw=yaw_angle_cdeg)
-            else:
-                self.log_message(f"Selected person {self.ht_backend.selected_person_id} not currently tracked. Disabling gimbal follow and resetting PID.")
-                self.toggle_gimbal_follow() # Turn off gimbal follow if target lost
-                self.gimbal_pitch_pid.reset()
-                self.gimbal_yaw_pid.reset()
-
-    def update_drone_follow(self):
-        if self.drone_follow_active and self.ht_backend.selected_person_id:
-            # 1. Get selected person's bounding box
-            target_info = self.ht_backend.get_tracked_object_info(self.ht_backend.selected_person_id)
-            if not target_info or 'box' not in target_info:
-                self.log_message(f"Selected person {self.ht_backend.selected_person_id} not currently tracked. Disabling drone follow.")
-                self.toggle_drone_follow()
-                return
-
-            x1, y1, x2, y2 = target_info['box']
-            center_x = (x1 + x2) / 2
-            center_y = (y1 + y2) / 2
-
-            # 2. Get drone's latest telemetry (including GPS)
-            drone_telemetry = self.telemetry_listener.get_latest_telemetry()
-            drone_lat = drone_telemetry.get('latitude')
-            drone_lon = drone_telemetry.get('longitude')
-            drone_alt = drone_telemetry.get('altitude') # Relative altitude
-            drone_heading = drone_telemetry.get('heading', 0) # Yaw in radians, default to 0 if not available
-            drone_pitch = drone_telemetry.get('pitch', 0) # Pitch in radians, default to 0 if not available
-            drone_roll = drone_telemetry.get('roll', 0) # Roll in radians, default to 0 if not available
-
-            if drone_lat is None or drone_lon is None or drone_alt is None:
-                self.log_message("Drone GPS or Altitude not available. Cannot initiate drone follow.")
-                return
-
-            # 3. Get original frame dimensions
-            frame_width = self.video_thread.original_frame_width
-            frame_height = self.video_thread.original_frame_height
-
-            if frame_width == 0 or frame_height == 0:
-                self.log_message("Video frame dimensions not available. Cannot estimate target GPS.")
-                return
-            
-            # 4. Call position_tracker to convert screen coordinates to target GNSS
-            # This method will be implemented in position_tracker.py
-            target_lat, target_lon, target_alt = self.position_tracker.get_target_gnss(
-                screen_x=center_x,
-                screen_y=center_y,
-                frame_width=frame_width,
-                frame_height=frame_height,
-                drone_lat=drone_lat,
-                drone_lon=drone_lon,
-                drone_alt=drone_alt,
-                drone_heading=drone_heading,
-                drone_pitch=drone_pitch,
-                drone_roll=drone_roll
-            )
-
-            if target_lat is None or target_lon is None:
-                self.log_message("Could not estimate target GPS. Drone follow paused.")
-                return
-            
-            # 5. Call waypoint_deployer to send the follow command
-            # This method will be implemented in waypoint_deployer.py
-            # The 'default_distance_meters' and 'default_altitude_meters' from upgrade_context are used here.
-            self.waypoint_deployer.send_follow_command(
-                target_lat=target_lat,
-                target_lon=target_lon,
-                target_alt=target_alt, # Use estimated target_alt
-                follow_distance=15.0, # From upgrade_context
-                follow_altitude=10.0 # From upgrade_context
-            )
-            self.log_message(f"Sending drone follow command to target: Lat={target_lat:.6f}, Lon={target_lon:.6f}, Alt={target_alt:.2f}")
-        else:
-            if self.drone_follow_active: # If still active but no selected person
-                self.log_message("Drone follow active but no person selected or tracked. Pausing.")
-                self.drone_follow_timer.stop() # Pause timer
-                self.drone_follow_button.setText("Drone Follow: Paused")
-
     def send_gimbal_command(self, axis, direction):
         # Define a step size for angular movement in degrees
         step_deg = 1 # 1 degree per click/command
@@ -871,18 +695,6 @@ class DroneControlGUI(QMainWindow):
 
         # Send MAVLink command for gimbal control using angles
         self.mavlink_communicator.send_gimbal_command(pitch=pitch_angle_cdeg, roll=0, yaw=yaw_angle_cdeg)
-
-    # def send_mavlink_gimbal_follow_command(self, pitch_rate, yaw_rate):
-    #     # These are angular rates in rad/s from the gimbal control
-    #     # The MAVLink command needs degrees/second for some implementations or specific units.
-    #     # Check MAVLink spec for GIMBAL_MANAGER_SET_MANUAL_CONTROL and your drone's expected units.
-    #     # For now, we'll assume the MAVLinkCommunicator will handle unit conversion if necessary.
-    #     self.mavlink_communicator.send_gimbal_manager_set_manual_control(
-    #         pitch_rate=pitch_rate,
-    #         yaw_rate=yaw_rate
-    #     )
-
-
 
     def update_telemetry_dashboard(self, message):
         # Store last known values

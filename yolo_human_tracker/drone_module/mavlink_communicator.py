@@ -18,14 +18,6 @@ class MavlinkCommunicator:
                 logging.error(f"Failed to establish MAVLink connection to {self.device}. `self.master` is None.")
                 return
 
-            # Wait for the first heartbeat to confirm the connection
-            logging.info("Waiting for MAVLink heartbeat...")
-            self.master.wait_heartbeat()
-            logging.info("MAVLink heartbeat received!")
-            
-            # Set gimbal mode to MAVLink Targeting
-            self.set_gimbal_mode()
-            
             logging.info(f"MAVLink communicator initialized for device: {self.device}")
         except Exception as e:
             logging.error(f"Failed to initialize MAVLink communicator for device {self.device}: {e}")
