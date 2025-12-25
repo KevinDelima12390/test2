@@ -108,6 +108,7 @@ class VideoStreamThread(QThread):
                     'name': 'N/A',
                     'id': 'N/A',
                     'confidence': 'N/A',
+                    'distance': 'N/A',
                     'image': None
                 }
 
@@ -117,6 +118,7 @@ class VideoStreamThread(QThread):
                         info_data['id'] = self.backend.selected_person_id
                         info_data['name'] = selected_obj.get('name', 'Unknown')
                         info_data['confidence'] = selected_obj.get('face_confidence', 0.0)
+                        info_data['distance'] = selected_obj.get('smoothed_distance', 0.0)
                         
                         # Extract face image if available
                         face_rect = selected_obj.get('face_rect')

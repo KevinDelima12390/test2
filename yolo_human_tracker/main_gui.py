@@ -238,6 +238,7 @@ class DroneControlGUI(QMainWindow):
         self.ht_name_label = QLabel("Name: N/A")
         self.ht_id_label = QLabel("ID: N/A")
         self.ht_confidence_label = QLabel("Confidence: N/A")
+        self.ht_distance_label = QLabel("Distance: N/A")  # New distance label
         self.ht_face_image_label = QLabel("No Face")
         self.ht_face_image_label.setFixedSize(120, 120)
         self.ht_face_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -246,6 +247,7 @@ class DroneControlGUI(QMainWindow):
         ht_info_layout.addWidget(self.ht_name_label)
         ht_info_layout.addWidget(self.ht_id_label)
         ht_info_layout.addWidget(self.ht_confidence_label)
+        ht_info_layout.addWidget(self.ht_distance_label)  # Add distance label
         ht_info_layout.addWidget(self.ht_face_image_label)
         ht_info_layout.addWidget(self.fps_label)
         ht_info_layout.addWidget(self.face_count_label) # Add face count label
@@ -589,6 +591,14 @@ class DroneControlGUI(QMainWindow):
         self.ht_name_label.setText(f"Name: {info_data['name']}")
         self.ht_id_label.setText(f"ID: {info_data['id']}")
         self.ht_confidence_label.setText(f"Confidence: {info_data['confidence']}")
+        
+        # Format distance display
+        distance = info_data.get('distance', 'N/A')
+        if isinstance(distance, (int, float)) and distance != 'N/A':
+            self.ht_distance_label.setText(f"Distance: {distance:.1f}m")
+        else:
+            self.ht_distance_label.setText("Distance: N/A")
+        
         if info_data['image'] is not None and isinstance(info_data['image'], np.ndarray):
             h, w, ch = info_data['image'].shape
             bytes_per_line = ch * w

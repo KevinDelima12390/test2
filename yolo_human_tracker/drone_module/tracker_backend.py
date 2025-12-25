@@ -107,6 +107,12 @@ class HumanTrackerBackend:
         # --- Stream State ---
         self.paused = False
 
+        # --- Distance estimation parameters ---
+        self.AVERAGE_HUMAN_HEIGHT_M = 1.75  # Average human height in meters
+        self.CAMERA_FOCAL_LENGTH_PX = 800    # Estimated focal length in pixels (calibrate for your camera)
+        self.CAMERA_HEIGHT_M = 1.5           # Height of camera from ground in meters
+        self.DISTANCE_SMOOTHING_FACTOR = 0.7 # Smoothing factor for distance estimation
+        
         # --- Drawing ---
         self.BOX_COLORS = {
             "recognized": (0, 255, 0),
@@ -117,6 +123,48 @@ class HumanTrackerBackend:
         self.FONT = cv2.FONT_HERSHEY_SIMPLEX
         self.FONT_SCALE = 0.6
         self.FONT_THICKNESS = 2
+
+    # ---------------------- Distance Estimation ----------------------
+    def calculate_distance(self, bbox_height_px, frame_height_px):
+        """
+        Calculate distance to person using bounding box height.
+        
+        Args:
+            bbox_height_px: Height of bounding box in pixels
+            frame_height_px: Height of the frame in pixels
+            
+        Returns:
+            Estimated distance in meters
+        """
+        if bbox_height_px <= 0:
+            return float('inf')
+        
+        # Simple distance estimation using similar triangles
+        # distance = (real_height * focal_length) / pixel_height
+        distance = (self.AVERAGE_HUMAN_HEIGHT_M * self.CAMERA_FOCAL_LENGTH_PX) / bbox_height_px
+        
+        # Apply reasonable bounds (1m to 50m)
+        distance = max(1.0, min(50.0, distance))
+        
+        return distance
+    
+    def smooth_distance(self, current_distance, previous_distance):
+        """
+        Apply smoothing to distance estimation to reduce jitter.
+        
+        Args:
+            current_distance: Current estimated distance
+            previous_distance: Previous estimated distance
+            
+        Returns:
+            Smoothed distance
+        """
+        if previous_distance is None:
+            return current_distance
+        
+        # Exponential smoothing
+        return (self.DISTANCE_SMOOTHING_FACTOR * previous_distance + 
+                (1 - self.DISTANCE_SMOOTHING_FACTOR) * current_distance)
 
     # ---------------------- Persistence ----------------------
     def load_known_faces(self):
@@ -376,13 +424,27 @@ class HumanTrackerBackend:
                     'face_id': None, 
                     'face_rect': None, 
                     'face_confidence': 0.0, 
-                    'name':'Unknown'
+                    'name':'Unknown',
+                    'distance': None,
+                    'smoothed_distance': None
                 })
+                
+                # Calculate distance based on bounding box height
+                bbox_height = y2 - y1
+                frame_height = frame.shape[0]
+                current_distance = self.calculate_distance(bbox_height, frame_height)
+                
+                # Apply smoothing
+                previous_distance = obj.get('smoothed_distance')
+                smoothed_distance = self.smooth_distance(current_distance, previous_distance)
+                
                 obj.update({
                     'box': [x1, y1, x2, y2],
                     'centroid': centroid,
                     'conf': float(conf),
-                    'cls': int(cls_id)
+                    'cls': int(cls_id),
+                    'distance': current_distance,
+                    'smoothed_distance': smoothed_distance
                 })
                 current_tracked_objects[track_id] = obj
             self.tracked_objects = current_tracked_objects
@@ -694,11 +756,25 @@ class HumanTrackerBackend:
             # Draw bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
-            # Draw label background
+            # Draw label with distance information
+            distance = obj.get('smoothed_distance', 0.0)
             label = f"ID: {track_id} {name}"
+            distance_label = f"Distance: {distance:.1f}m"
+            
+            # Calculate text sizes
             (text_w, text_h), baseline = cv2.getTextSize(label, self.FONT, self.FONT_SCALE, self.FONT_THICKNESS)
-            cv2.rectangle(frame, (x1, y1 - text_h - baseline), (x1 + text_w, y1), color, -1)
-            cv2.putText(frame, label, (x1, y1 - baseline), self.FONT, self.FONT_SCALE, (255, 255, 255), self.FONT_THICKNESS, cv2.LINE_AA)
+            (dist_w, dist_h), dist_baseline = cv2.getTextSize(distance_label, self.FONT, self.FONT_SCALE * 0.8, self.FONT_THICKNESS)
+            
+            # Draw background for both labels
+            max_width = max(text_w, dist_w)
+            total_height = text_h + dist_h + baseline + dist_baseline + 5
+            cv2.rectangle(frame, (x1, y1 - total_height), (x1 + max_width, y1), color, -1)
+            
+            # Draw main label
+            cv2.putText(frame, label, (x1, y1 - dist_h - dist_baseline - 5), self.FONT, self.FONT_SCALE, (255, 255, 255), self.FONT_THICKNESS, cv2.LINE_AA)
+            
+            # Draw distance label
+            cv2.putText(frame, distance_label, (x1, y1 - dist_baseline), self.FONT, self.FONT_SCALE * 0.8, (255, 255, 255), self.FONT_THICKNESS, cv2.LINE_AA)
 
             # Draw face rectangle if available
             if obj.get('face_rect'):
