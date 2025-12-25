@@ -168,6 +168,27 @@ class DroneControlGUI(QMainWindow):
         self.clear_waypoints_button.clicked.connect(self.clear_map_waypoints)
         waypoint_layout.addWidget(self.clear_waypoints_button)
 
+        # Camera Selection
+        camera_group = QGroupBox("Camera Source")
+        left_panel.addWidget(camera_group)
+        camera_layout = QVBoxLayout(camera_group)
+        
+        self.camera_combo = QComboBox()
+        self.camera_combo.addItem("Default Camera (0)", 0)
+        self.camera_combo.addItem("External Camera (1)", 1)
+        self.camera_combo.addItem("IP Camera (Phone)", "ip")
+        camera_layout.addWidget(self.camera_combo)
+        
+        self.ip_input = QLineEdit()
+        self.ip_input.setPlaceholderText("Enter IP Camera URL (e.g., http://192.168.1.100:8080/video)")
+        self.ip_input.setEnabled(False)
+        camera_layout.addWidget(self.ip_input)
+        
+        self.camera_combo.currentTextChanged.connect(self.on_camera_selection_changed)
+        
+        self.connect_camera_button = QPushButton("Connect Camera")
+        self.connect_camera_button.clicked.connect(self.reconnect_camera)
+        camera_layout.addWidget(self.connect_camera_button)
 
         # --- Center Panel: Video Feed ---
         self.video_label = ClickableVideoLabel("Waiting for video stream...")
@@ -305,21 +326,48 @@ class DroneControlGUI(QMainWindow):
         self.save_new_face_button.clicked.connect(self.save_new_face_dialog)
         ht_controls_layout.addWidget(self.save_new_face_button)
 
+    def on_camera_selection_changed(self, text):
+        """Handle camera selection change"""
+        if "IP Camera" in text:
+            self.ip_input.setEnabled(True)
+        else:
+            self.ip_input.setEnabled(False)
+    
+    def reconnect_camera(self):
+        """Reconnect to the selected camera source"""
+        if self.video_thread:
+            self.video_thread._run = False
+            self.video_thread.quit()
+            self.video_thread.wait()
+        
+        self.start_video_stream()
+    
     def setup_camera(self):
         self.start_video_stream()
 
     def start_video_stream(self):
         try:
-            self.log_message("Starting webcam video stream...")
-            rtsp_url = 0
-            self.video_thread = VideoStreamThread(self.ht_backend, rtsp_url, self)
+            # Determine camera source based on selection
+            current_selection = self.camera_combo.currentData()
+            
+            if current_selection == "ip":
+                camera_url = self.ip_input.text().strip()
+                if not camera_url:
+                    self.log_message("Please enter IP camera URL first")
+                    return
+                self.log_message(f"Connecting to IP camera: {camera_url}")
+            else:
+                camera_url = current_selection
+                self.log_message(f"Starting camera {camera_url}...")
+            
+            self.video_thread = VideoStreamThread(self.ht_backend, camera_url, self)
             self.video_thread.change_pixmap_signal.connect(self.update_image)
             self.video_thread.update_info_signal.connect(self.update_ht_info_panel)
             self.video_thread.update_fps_signal.connect(self.update_fps)
             self.video_thread.face_count_signal.connect(self.update_face_count) # Connect new signal
             self.video_thread.error_signal.connect(self.log_message)
             self.video_thread.start()
-            self.log_message("Video stream thread started. Waiting for GStreamer pipeline to provide frames...")
+            self.log_message("Video stream thread started. Waiting for camera to provide frames...")
         except Exception as e:
             self.log_message(f"Error starting video stream: {e}")
 

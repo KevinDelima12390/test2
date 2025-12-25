@@ -18,23 +18,43 @@ class VideoStreamThread(QThread):
         self.backend = backend
         self.stream_url = stream_url
         logging.info(f"Attempting to open video stream with URL/Index: {self.stream_url}")
+        
         if isinstance(self.stream_url, str):
-            # Use cv2.CAP_FFMPEG for RTSP streams
-            self.cap = cv2.VideoCapture(self.stream_url, cv2.CAP_FFMPEG)
-            # Add buffer size to help with network streams
-            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3) # Add this line
-            # Explicitly set the video codec to MJPEG
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcode(*'MJPG')) # Add this line
+            if self.stream_url.startswith(('http://', 'https://')):
+                # For HTTP/HTTPS IP camera streams (like phone cameras)
+                self.cap = cv2.VideoCapture(self.stream_url, cv2.CAP_FFMPEG)
+                # Set properties for IP cameras
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer for lower latency
+                self.cap.set(cv2.CAP_PROP_FPS, 30)  # Set desired FPS
+            elif self.stream_url.startswith('rtsp://'):
+                # Use cv2.CAP_FFMPEG for RTSP streams
+                self.cap = cv2.VideoCapture(self.stream_url, cv2.CAP_FFMPEG)
+                # Add buffer size to help with network streams
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+                # Explicitly set the video codec to MJPEG
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            else:
+                # Other string URLs
+                self.cap = cv2.VideoCapture(self.stream_url)
         else:
-            # For local cameras, do not use CAP_FFMPEG
+            # For local cameras (index), do not use CAP_FFMPEG
             self.cap = cv2.VideoCapture(self.stream_url)
+            # Set properties for local cameras
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
         
         if not self.cap.isOpened():
             self._run = False
-            self.error_signal.emit(f"Error: Could not open RTSP stream at {self.stream_url}.") # Updated log
-            logging.error(f"Failed to open RTSP video stream at {self.stream_url}") # Updated log
+            self.error_signal.emit(f"Error: Could not open video stream at {self.stream_url}.")
+            logging.error(f"Failed to open video stream at {self.stream_url}")
         else:
-            logging.info(f"Successfully opened RTSP video stream at {self.stream_url}") # Updated log
+            logging.info(f"Successfully opened video stream at {self.stream_url}")
+            # Log camera properties
+            width = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            height = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            logging.info(f"Camera properties - Width: {width}, Height: {height}, FPS: {fps}")
         
         self.prev_frame_time = 0
         self.frame_width = 0
@@ -53,13 +73,13 @@ class VideoStreamThread(QThread):
             if not self.backend.paused:
                 ret, frame = self.cap.read()
                 if not ret:
-                    self.error_signal.emit("Error: Failed to read frame from RTSP stream.") # Updated log
-                    logging.warning("Failed to read frame from RTSP video stream.") # Updated log
+                    self.error_signal.emit("Error: Failed to read frame from video stream.")
+                    logging.warning("Failed to read frame from video stream.")
                     time.sleep(0.1)
                     continue 
                 
                 if frame is None:
-                    logging.warning("Received empty frame from RTSP video stream.") # Updated log
+                    logging.warning("Received empty frame from video stream.")
                     time.sleep(0.1)
                     continue
 

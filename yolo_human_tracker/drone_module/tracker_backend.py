@@ -96,6 +96,13 @@ class HumanTrackerBackend:
         self.face_recognition_enabled = False
         self.low_light_enhancement_enabled = False
         self.selected_person_id = None # New attribute for selected person
+        
+        # --- Face Recognition Performance Optimization ---
+        self.frame_count = 0
+        self.face_recognition_interval = 10  # Process face recognition every N frames
+        self.last_face_recognition_frame = 0
+        self.face_cache = {}  # Cache face encodings temporarily
+        self.cache_expiry = 30  # Cache expires after N frames
 
         # --- Stream State ---
         self.paused = False
@@ -382,9 +389,32 @@ class HumanTrackerBackend:
         else:
             self.tracked_objects = {} # Clear tracked objects if nothing is detected/tracked
 
-        # --- Face recognition for selected person using YuNet ---
-        if self.face_recognition_enabled and self.yunet_detector is not None and self.selected_person_id in self.tracked_objects:
+        # --- Face recognition for selected person using YuNet (OPTIMIZED) ---
+        self.frame_count += 1
+        
+        # Only process face recognition every N frames for performance
+        if (self.face_recognition_enabled and 
+            self.yunet_detector is not None and 
+            self.selected_person_id in self.tracked_objects and
+            (self.frame_count - self.last_face_recognition_frame) >= self.face_recognition_interval):
+            
+            self.last_face_recognition_frame = self.frame_count
             obj = self.tracked_objects[self.selected_person_id]
+            
+            # Check if we have cached face data for this track_id
+            if (self.selected_person_id in self.face_cache and 
+                (self.frame_count - self.face_cache[self.selected_person_id]['frame']) < self.cache_expiry):
+                # Use cached face data
+                cached_data = self.face_cache[self.selected_person_id]
+                obj.update({
+                    'face_id': cached_data['face_id'],
+                    'name': cached_data['name'], 
+                    'face_confidence': cached_data.get('face_confidence', 0.0),
+                    'face_rect': cached_data.get('face_rect')
+                })
+            else:
+                # Process face recognition (expensive operation)
+                self._process_face_recognition(obj, frame)
             x1, y1, x2, y2 = obj['box']
             # Ensure coordinates are within frame bounds
             x1, y1, x2, y2 = max(0, x1), max(0, y1), min(frame.shape[1], x2), min(frame.shape[0], y2)
@@ -490,17 +520,157 @@ class HumanTrackerBackend:
                                 'image': cv2.resize(face_img, (100, 100)) if face_img.size > 0 else None,
                                 'name': 'Unknown'
                             }
-                            obj['face_id'] = new_unidentified_id
-                            obj['name'] = 'Unknown' # Explicitly set for new unidentified
-                    else:
-                        obj['face_id'] = "No Face Detected" # No encoding found for the detected face
-                else:
-                    obj['face_id'] = "No Face Detected" # No face detected in ROI
-            else:
-                obj['face_id'] = "No Face Detected" # ROI size is 0
-
         frame = self.draw_overlays(frame, self.tracked_objects)
         return frame, self.tracked_objects, self.known_faces_db
+    
+    def _process_face_recognition(self, obj, frame):
+        """Process face recognition for a single object (optimized method)"""
+        x1, y1, x2, y2 = obj['box']
+        # Ensure coordinates are within frame bounds
+        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(frame.shape[1], x2), min(frame.shape[0], y2)
+        
+        # Crop ROI for the selected person
+        roi = frame[y1:y2, x1:x2]
+        
+        if roi.size > 0:
+            h_roi, w_roi, _ = roi.shape
+            
+            # Skip very small ROIs to avoid unnecessary processing
+            if h_roi < 50 or w_roi < 50:
+                obj['face_id'] = "ROI too small"
+                return
+            
+            # Calculate padding to make ROI square
+            pad_left, pad_top = 0, 0
+            if h_roi > w_roi:
+                pad_size = (h_roi - w_roi) // 2
+                padded_roi = cv2.copyMakeBorder(roi, 0, 0, pad_size, pad_size, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+                pad_left = pad_size
+            elif w_roi > h_roi:
+                pad_size = (w_roi - h_roi) // 2
+                padded_roi = cv2.copyMakeBorder(roi, pad_size, pad_size, 0, 0, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+                pad_top = pad_size
+            else: # Already square
+                padded_roi = roi
+            
+            # Use smaller size for face detection to improve speed
+            detection_size = 320  # YuNet requires fixed 320x320
+            resized_roi = cv2.resize(padded_roi, (detection_size, detection_size))
+            
+            # Detect faces in the ROI using YuNet
+            retval, faces_in_roi = self.yunet_detector.detect(resized_roi)
+            
+            if retval and faces_in_roi is not None and len(faces_in_roi) > 0:
+                # Take the first detected face
+                x1_det, y1_det, w_det, h_det = map(int, faces_in_roi[0][:4])
+
+                # Scale factor from detection_size to padded_roi size
+                scale_factor = padded_roi.shape[0] / 320  # Fixed 320x320 input size
+
+                # Adjust face_rect_roi coordinates back to the padded ROI scale
+                x1_scaled = int(x1_det * scale_factor)
+                y1_scaled = int(y1_det * scale_factor)
+                w_scaled = int(w_det * scale_factor)
+                h_scaled = int(h_det * scale_factor)
+
+                # Un-pad to get coordinates relative to the original 'roi'
+                x1_unpadded = x1_scaled - pad_left
+                y1_unpadded = y1_scaled - pad_top
+                
+                # Calculate corresponding bottom-right
+                x2_unpadded = x1_unpadded + w_scaled
+                y2_unpadded = y1_unpadded + h_scaled
+
+                # Convert to (top, right, bottom, left) format relative to original 'roi'
+                face_rect_roi_unpadded = (y1_unpadded, x2_unpadded, y2_unpadded, x1_unpadded)
+                
+                # Convert face_rect_roi_unpadded coordinates to original frame coordinates
+                top_orig = face_rect_roi_unpadded[0] + y1
+                right_orig = face_rect_roi_unpadded[1] + x1
+                bottom_orig = face_rect_roi_unpadded[2] + y1
+                left_orig = face_rect_roi_unpadded[3] + x1
+                face_rect_original_frame = (top_orig, right_orig, bottom_orig, left_orig)
+                
+                obj['face_rect'] = face_rect_original_frame
+
+                # Only compute face encodings if we have a reasonable face size
+                face_height = bottom_orig - top_orig
+                face_width = right_orig - left_orig
+                if face_height > 40 and face_width > 40:
+                    rgb_frame_for_encoding = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    enc_list = face_recognition.face_encodings(rgb_frame_for_encoding, [face_rect_original_frame])
+                    
+                    if enc_list:
+                        encoding = enc_list[0]
+                        match_found = False
+                        
+                        if self.known_faces_db: # Only try matching if we have known faces
+                            # Optimize: pre-compute known encodings list (could be cached further)
+                            known_encodings_flat = []
+                            known_ids_flat = []
+                            for face_id, data in self.known_faces_db.items():
+                                # Use only the most recent encoding for faster comparison
+                                if data['encodings']:
+                                    known_encodings_flat.append(data['encodings'][-1])
+                                    known_ids_flat.append(face_id)
+                            
+                            if known_encodings_flat:
+                                distances = face_recognition.face_distance(known_encodings_flat, encoding)
+                                best_idx = np.argmin(distances)
+                                if distances[best_idx] < self.FACE_RECOGNITION_DISTANCE_THRESHOLD:
+                                    fid = known_ids_flat[best_idx]
+                                    face_confidence = 1.0 - distances[best_idx]
+                                    obj.update({
+                                        'face_id': fid,
+                                        'name': self.known_faces_db[fid].get('name', 'Unknown'),
+                                        'face_confidence': face_confidence
+                                    })
+                                    
+                                    # Cache the result
+                                    self.face_cache[self.selected_person_id] = {
+                                        'face_id': fid,
+                                        'name': self.known_faces_db[fid].get('name', 'Unknown'),
+                                        'face_confidence': face_confidence,
+                                        'face_rect': face_rect_original_frame,
+                                        'frame': self.frame_count
+                                    }
+                                    
+                                    # Add new encoding to the deque for continuous learning if not too close
+                                    if distances[best_idx] > self.MIN_DISTINCT_FACE_DISTANCE:
+                                        self.known_faces_db[fid]['encodings'].append(encoding)
+                                    match_found = True
+                        
+                        if not match_found:
+                            # Assign new "Unidentified" ID if no match is found
+                            new_unidentified_id = f"Unidentified_{self.next_person_id_counter}"
+                            self.next_person_id_counter += 1
+                            
+                            # Extract face image from original frame using corrected coordinates
+                            face_img = frame[top_orig:bottom_orig, left_orig:right_orig]
+                            self.known_faces_db[new_unidentified_id] = {
+                                'encodings': deque([encoding], maxlen=self.MAX_FACE_IMAGES_PER_PERSON),
+                                'image': cv2.resize(face_img, (100, 100)) if face_img.size > 0 else None,
+                                'name': 'Unknown'
+                            }
+                            obj['face_id'] = new_unidentified_id
+                            obj['name'] = 'Unknown'
+                            
+                            # Cache the result
+                            self.face_cache[self.selected_person_id] = {
+                                'face_id': new_unidentified_id,
+                                'name': 'Unknown',
+                                'face_confidence': 0.0,
+                                'face_rect': face_rect_original_frame,
+                                'frame': self.frame_count
+                            }
+                    else:
+                        obj['face_id'] = "No encoding found"
+                else:
+                    obj['face_id'] = "Face too small"
+            else:
+                obj['face_id'] = "No face detected"
+        else:
+            obj['face_id'] = "Invalid ROI"
 
     # ---------------------- Drawing Overlays ----------------------
     def draw_overlays(self, frame, tracked_objects):
