@@ -25,7 +25,6 @@ import sqlite3 # Import sqlite3 for direct DB access
 
 from drone_module.websocket_bridge import WebSocketBridge
 from drone_module.mavlink_communicator import MavlinkCommunicator
-from drone_module.gimbal_control import GimbalControl
 from drone_module.drone_telemetry import DroneTelemetryListener
 # from map_widget import MapWidget # Removed MapWidget import
 from drone_module.tracker_backend import HumanTrackerBackend
@@ -42,9 +41,20 @@ IBIS_CONFIG = {
     "TOKEN": None
 }
 
+# Gimbal Control Configuration
+GIMBAL_CONFIG = {
+    "PI_IP": "192.168.0.101",  # IMPORTANT: Update with your Raspberry Pi's IP
+    "PORT": 5005
+}
+
+# Video Stream from Pi Configuration
+UDP_PORT_FOR_PI_STREAM = 5000 # Must match port used by rpicam-vid on Raspberry Pi
+
 # Import the Flask app from map_server.py
 # Import the Flask app from map_server.py
 # from map_server import app as flask_app, coords as map_coords
+
+from drone_module.gimbal_udp_sender import GimbalUDPSender
 
 def start_async_loop(loop):
     asyncio.set_event_loop(loop)
@@ -110,6 +120,7 @@ class DroneControlGUI(QMainWindow):
         self.ht_backend = HumanTrackerBackend()
         self.telemetry_listener = DroneTelemetryListener(telemetry_callback=self.queue_telemetry_message)
         self.mavlink_communicator = MavlinkCommunicator()
+        self.gimbal_udp_sender = GimbalUDPSender(GIMBAL_CONFIG["PI_IP"], GIMBAL_CONFIG["PORT"])
 
         self.attitude_indicator = AttitudeIndicatorWidget(self)
         self.compass_widget = CompassWidget(self)
@@ -177,6 +188,7 @@ class DroneControlGUI(QMainWindow):
         self.camera_combo.addItem("Default Camera (0)", 0)
         self.camera_combo.addItem("External Camera (1)", 1)
         self.camera_combo.addItem("IP Camera (Phone)", "ip")
+        self.camera_combo.addItem("Raspberry Pi UDP Stream", "udp_pi")
         camera_layout.addWidget(self.camera_combo)
         
         self.ip_input = QLineEdit()
@@ -282,19 +294,28 @@ class DroneControlGUI(QMainWindow):
         bottom_panel = QHBoxLayout()
         self.main_layout.addLayout(bottom_panel)
 
+        
+
         # Drone Controls
+
         drone_controls_group = QGroupBox("Drone Controls")
+
         bottom_panel.addWidget(drone_controls_group)
+
         drone_controls_layout = QHBoxLayout(drone_controls_group)
-        self.gimbal_control = GimbalControl()
-        self.gimbal_control.gimbal_command.connect(self.send_gimbal_command)
-        drone_controls_layout.addWidget(self.gimbal_control)
+
+
 
         arm_button = QPushButton("Arm")
+
         arm_button.clicked.connect(self.arm_drone)
+
         disarm_button = QPushButton("Disarm")
+
         disarm_button.clicked.connect(self.disarm_drone)
+
         drone_controls_layout.addWidget(arm_button)
+
         drone_controls_layout.addWidget(disarm_button)
 
         diagnostics_button = QPushButton("Run Diagnostics")
@@ -331,6 +352,10 @@ class DroneControlGUI(QMainWindow):
     def on_camera_selection_changed(self, text):
         """Handle camera selection change"""
         if "IP Camera" in text:
+            self.ip_input.setPlaceholderText("Enter IP Camera URL (e.g., http://192.168.1.100:8080/video)")
+            self.ip_input.setEnabled(True)
+        elif "Raspberry Pi UDP Stream" in text:
+            self.ip_input.setPlaceholderText("Enter UDP Stream Address (e.g., udp://0.0.0.0:5000)")
             self.ip_input.setEnabled(True)
         else:
             self.ip_input.setEnabled(False)
@@ -358,11 +383,19 @@ class DroneControlGUI(QMainWindow):
                     self.log_message("Please enter IP camera URL first")
                     return
                 self.log_message(f"Connecting to IP camera: {camera_url}")
+            elif current_selection == "udp_pi":
+                camera_url = self.ip_input.text().strip()
+                if not camera_url:
+                    # Provide a default if user doesn't enter anything for UDP
+                    camera_url = f"udp://0.0.0.0:{UDP_PORT_FOR_PI_STREAM}" # Define UDP_PORT_FOR_PI_STREAM as 5000 earlier
+                    self.log_message(f"Using default Raspberry Pi UDP stream address: {camera_url}")
+                else:
+                    self.log_message(f"Connecting to Raspberry Pi UDP stream: {camera_url}")
             else:
                 camera_url = current_selection
                 self.log_message(f"Starting camera {camera_url}...")
             
-            self.video_thread = VideoStreamThread(self.ht_backend, camera_url, self)
+            self.video_thread = VideoStreamThread(self.ht_backend, camera_url, self.gimbal_udp_sender, self)
             self.video_thread.change_pixmap_signal.connect(self.update_image)
             self.video_thread.update_info_signal.connect(self.update_ht_info_panel)
             self.video_thread.update_fps_signal.connect(self.update_fps)
@@ -734,26 +767,6 @@ class DroneControlGUI(QMainWindow):
             else:
                 self.log_message("Save New Face Error: Selected face data not found.")
 
-    def send_gimbal_command(self, axis, direction):
-        # Define a step size for angular movement in degrees
-        step_deg = 1 # 1 degree per click/command
-
-        if axis == 'pan':
-            self.pan += direction * step_deg
-            # Clamp pan angle to a reasonable range, e.g., -180 to +180 degrees
-            self.pan = max(-180, min(180, self.pan))
-        elif axis == 'tilt':
-            self.tilt += direction * step_deg
-            # Clamp tilt angle to a reasonable range, e.g., -90 (down) to 0 (horizon) degrees
-            self.tilt = max(-90, min(0, self.tilt))
-        
-        # Convert to centi-degrees for MAVLink command
-        pitch_angle_cdeg = int(self.tilt * 100)
-        yaw_angle_cdeg = int(self.pan * 100)
-
-        # Send MAVLink command for gimbal control using angles
-        self.mavlink_communicator.send_gimbal_command(pitch=pitch_angle_cdeg, roll=0, yaw=yaw_angle_cdeg)
-
     def update_telemetry_dashboard(self, message):
         # Store last known values
         if 'latitude' in message: self.last_lat = message.get('latitude')
@@ -859,6 +872,7 @@ class DroneControlGUI(QMainWindow):
         self.log_message("Shutting down...")
         self.video_thread.stop()
         self.telemetry_listener.stop()
+        self.gimbal_udp_sender.close()
         self.ht_backend.save_known_faces()
         self.telemetry_listener.join() # Wait for the telemetry thread to finish
         event.accept()

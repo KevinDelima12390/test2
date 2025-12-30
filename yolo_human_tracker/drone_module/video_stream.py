@@ -12,11 +12,12 @@ class VideoStreamThread(QThread):
     face_count_signal = pyqtSignal(int)
     error_signal = pyqtSignal(str)
 
-    def __init__(self, backend, stream_url, parent=None):
+    def __init__(self, backend, stream_url, gimbal_sender, parent=None):
         super().__init__(parent)
         self._run = True
         self.backend = backend
         self.stream_url = stream_url
+        self.gimbal_sender = gimbal_sender  # Store the gimbal sender object
         logging.info(f"Attempting to open video stream with URL/Index: {self.stream_url}")
         
         if isinstance(self.stream_url, str):
@@ -33,6 +34,9 @@ class VideoStreamThread(QThread):
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
                 # Explicitly set the video codec to MJPEG
                 self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            elif self.stream_url.startswith('udp://'):
+                # For UDP streams (e.g., from Raspberry Pi's rpicam-vid)
+                self.cap = cv2.VideoCapture(self.stream_url + "?overrun_nonfatal=1&fifo_size=50000000", cv2.CAP_FFMPEG)
             else:
                 # Other string URLs
                 self.cap = cv2.VideoCapture(self.stream_url)
@@ -86,6 +90,24 @@ class VideoStreamThread(QThread):
                 self.frame_height, self.frame_width, _ = frame.shape
 
                 display_frame, tracked_objects, _ = self.backend.process_frame(frame.copy())
+
+                # --- Visual Servoing: Send error vector to gimbal ---
+                if self.gimbal_sender:
+                    error_x, error_y = 0.0, 0.0
+                    if self.backend.selected_person_id is not None:
+                        obj = tracked_objects.get(self.backend.selected_person_id)
+                        if obj:
+                            # Calculate normalized error (-1.0 to 1.0)
+                            frame_center_x = self.frame_width / 2
+                            frame_center_y = self.frame_height / 2
+                            target_x = obj['box'][0] + (obj['box'][2] - obj['box'][0]) / 2
+                            target_y = obj['box'][1] + (obj['box'][3] - obj['box'][1]) / 2
+                            
+                            error_x = (target_x - frame_center_x) / frame_center_x
+                            error_y = (target_y - frame_center_y) / frame_center_y
+                    
+                    self.gimbal_sender.send_error_vector(error_x, error_y)
+                # --- End Visual Servoing ---
 
                 if display_frame is None:
                     logging.warning("Received empty display_frame after processing.")
