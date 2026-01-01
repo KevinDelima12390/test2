@@ -26,6 +26,8 @@ import sqlite3 # Import sqlite3 for direct DB access
 from drone_module.websocket_bridge import WebSocketBridge
 from drone_module.mavlink_communicator import MavlinkCommunicator
 from drone_module.drone_telemetry import DroneTelemetryListener
+from drone_module.gimbal_udp_sender import GimbalUDPSender
+from drone_module.gimbal_control import GimbalControl
 # from map_widget import MapWidget # Removed MapWidget import
 from drone_module.tracker_backend import HumanTrackerBackend
 from drone_module.video_stream import VideoStreamThread
@@ -50,11 +52,7 @@ GIMBAL_CONFIG = {
 # Video Stream from Pi Configuration
 UDP_PORT_FOR_PI_STREAM = 5000 # Must match port used by rpicam-vid on Raspberry Pi
 
-# Import the Flask app from map_server.py
-# Import the Flask app from map_server.py
-# from map_server import app as flask_app, coords as map_coords
 
-from drone_module.gimbal_udp_sender import GimbalUDPSender
 
 def start_async_loop(loop):
     asyncio.set_event_loop(loop)
@@ -139,7 +137,7 @@ class DroneControlGUI(QMainWindow):
         self.create_main_layout()
 
         # Camera Setup
-        self.setup_camera()
+        # self.setup_camera()
 
         # Start background services
         # asyncio.run_coroutine_threadsafe(
@@ -154,261 +152,275 @@ class DroneControlGUI(QMainWindow):
     def _run_flask_server(self):
         flask_app.run(host="0.0.0.0", port=5050, debug=False)
 
-    def create_main_layout(self):
-        main_horizontal_layout = QHBoxLayout()
-        self.main_layout.addLayout(main_horizontal_layout)
-
-        # --- Left Panel ---
-        left_panel = QVBoxLayout()
-        main_horizontal_layout.addLayout(left_panel, 1)
-
-        # Map View (now in external browser)
-        map_group = QGroupBox("Map View (External Browser)")
-        left_panel.addWidget(map_group)
-        map_layout = QVBoxLayout(map_group)
-        self.map_view = QWebEngineView()
-        self.map_view.setUrl(QUrl("http://127.0.0.1:5050"))
-        map_layout.addWidget(self.map_view)
-
-        # Waypoint Deployer
-        waypoint_group = QGroupBox("Mission Waypoints")
-        left_panel.addWidget(waypoint_group)
-        waypoint_layout = QVBoxLayout(waypoint_group)
-        
-        self.clear_waypoints_button = QPushButton("Clear Map Waypoints")
-        self.clear_waypoints_button.clicked.connect(self.clear_map_waypoints)
-        waypoint_layout.addWidget(self.clear_waypoints_button)
-
-        # Camera Selection
-        camera_group = QGroupBox("Camera Source")
-        left_panel.addWidget(camera_group)
-        camera_layout = QVBoxLayout(camera_group)
-        
-        self.camera_combo = QComboBox()
-        self.camera_combo.addItem("Default Camera (0)", 0)
-        self.camera_combo.addItem("External Camera (1)", 1)
-        self.camera_combo.addItem("IP Camera (Phone)", "ip")
-        self.camera_combo.addItem("Raspberry Pi UDP Stream", "udp_pi")
-        camera_layout.addWidget(self.camera_combo)
-        
-        self.ip_input = QLineEdit()
-        self.ip_input.setPlaceholderText("Enter IP Camera URL (e.g., http://192.168.1.100:8080/video)")
-        self.ip_input.setEnabled(False)
-        camera_layout.addWidget(self.ip_input)
-        
-        self.camera_combo.currentTextChanged.connect(self.on_camera_selection_changed)
-        
-        self.connect_camera_button = QPushButton("Connect Camera")
-        self.connect_camera_button.clicked.connect(self.reconnect_camera)
-        camera_layout.addWidget(self.connect_camera_button)
-
-        # --- Center Panel: Video Feed ---
-        self.video_label = ClickableVideoLabel("Waiting for video stream...")
-        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setStyleSheet("background-color: black; color: white;")
-        self.video_label.clicked_coordinates.connect(self.handle_video_click)
-        main_horizontal_layout.addWidget(self.video_label, 3)
-
-        # --- Right Panel ---
-        right_panel = QVBoxLayout()
-        main_horizontal_layout.addLayout(right_panel, 1)
-
-        # Drone Status Indicators
-        status_group = QGroupBox("Drone Status")
-        right_panel.addWidget(status_group)
-        status_layout = QHBoxLayout(status_group)
-        self.connection_status_label = QLabel("DISCONNECTED")
-        self.connection_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.connection_status_label.setStyleSheet("background-color: red; color: white; font-weight: bold;")
-        self.armed_status_label = QLabel("DISARMED")
-        self.armed_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.armed_status_label.setStyleSheet("background-color: gray; color: white; font-weight: bold;")
-        status_layout.addWidget(self.connection_status_label)
-        status_layout.addWidget(self.armed_status_label)
-
-        # Drone Telemetry
-        telemetry_group = QGroupBox("Drone Telemetry")
-        right_panel.addWidget(telemetry_group)
-        telemetry_layout = QVBoxLayout(telemetry_group) # Existing layout for the group
-
-        # New Horizontal Layout for visual indicators
-        telemetry_visual_layout = QHBoxLayout()
-        telemetry_layout.addLayout(telemetry_visual_layout)
-        
-        telemetry_visual_layout.addWidget(self.attitude_indicator)
-        telemetry_visual_layout.addWidget(self.compass_widget)
-
-        # Simplified text telemetry dashboard
-        self.telemetry_dashboard = QLabel("Waiting for drone connection...")
-        self.telemetry_dashboard.setAlignment(Qt.AlignmentFlag.AlignTop)
-        telemetry_layout.addWidget(self.telemetry_dashboard) # Keep existing text dashboard below visuals
-
-        # Human Tracker Info
-        ht_info_group = QGroupBox("Human Tracker Info")
-        right_panel.addWidget(ht_info_group)
-        ht_info_layout = QVBoxLayout(ht_info_group)
-        self.ht_name_label = QLabel("Name: N/A")
-        self.ht_id_label = QLabel("ID: N/A")
-        self.ht_confidence_label = QLabel("Confidence: N/A")
-        self.ht_distance_label = QLabel("Distance: N/A")  # New distance label
-        self.ht_face_image_label = QLabel("No Face")
-        self.ht_face_image_label.setFixedSize(120, 120)
-        self.ht_face_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.fps_label = QLabel("FPS: 0")
-        self.face_count_label = QLabel("Faces: 0") # New label for face count
-        ht_info_layout.addWidget(self.ht_name_label)
-        ht_info_layout.addWidget(self.ht_id_label)
-        ht_info_layout.addWidget(self.ht_confidence_label)
-        ht_info_layout.addWidget(self.ht_distance_label)  # Add distance label
-        ht_info_layout.addWidget(self.ht_face_image_label)
-        ht_info_layout.addWidget(self.fps_label)
-        ht_info_layout.addWidget(self.face_count_label) # Add face count label
-        ht_info_layout.addStretch()
-
-        # Log and Console Tabs
-        self.log_tabs = QTabWidget()
-        right_panel.addWidget(self.log_tabs)
-
-        # System Log Tab
-        self.system_log = QTextEdit()
-        self.system_log.setReadOnly(True)
-        self.log_tabs.addTab(self.system_log, "System Logs")
-
-        # Drone Log Tab
-        self.drone_log = QTextEdit()
-        self.drone_log.setReadOnly(True)
-        self.log_tabs.addTab(self.drone_log, "Drone Logs")
-
-        # MAVLink Console Tab
-        self.mavlink_console_widget = QWidget()
-        self.log_tabs.addTab(self.mavlink_console_widget, "MAVLink Console")
-        console_layout = QVBoxLayout(self.mavlink_console_widget)
-        self.mavlink_console_output = QTextEdit()
-        self.mavlink_console_output.setReadOnly(True)
-        self.mavlink_console_input = QLineEdit()
-        self.mavlink_console_input.returnPressed.connect(self.send_mavlink_console_command)
-        console_layout.addWidget(self.mavlink_console_output)
-        console_layout.addWidget(self.mavlink_console_input)
-
-        # --- Bottom Panel: Controls ---
-        bottom_panel = QHBoxLayout()
-        self.main_layout.addLayout(bottom_panel)
-
-        
-
-        # Drone Controls
-
-        drone_controls_group = QGroupBox("Drone Controls")
-
-        bottom_panel.addWidget(drone_controls_group)
-
-        drone_controls_layout = QHBoxLayout(drone_controls_group)
-
-
-
-        arm_button = QPushButton("Arm")
-
-        arm_button.clicked.connect(self.arm_drone)
-
-        disarm_button = QPushButton("Disarm")
-
-        disarm_button.clicked.connect(self.disarm_drone)
-
-        drone_controls_layout.addWidget(arm_button)
-
-        drone_controls_layout.addWidget(disarm_button)
-
-        diagnostics_button = QPushButton("Run Diagnostics")
-        diagnostics_button.clicked.connect(self.run_diagnostics)
-        drone_controls_layout.addWidget(diagnostics_button)
-
-        flight_mode_box = QComboBox()
-        flight_mode_box.addItems(["Stabilize", "Loiter", "RTL", "Auto"])
-        flight_mode_box.textActivated.connect(self.set_flight_mode)
-        drone_controls_layout.addWidget(flight_mode_box)
-
-        # Human Tracker Controls
-        ht_controls_group = QGroupBox("Human Tracker Controls")
-        bottom_panel.addWidget(ht_controls_group)
-        ht_controls_layout = QHBoxLayout(ht_controls_group)
-        self.fr_toggle_button = QPushButton("FR: Off")
-        self.fr_toggle_button.clicked.connect(self.toggle_fr)
-        self.ll_toggle_button = QPushButton("Low Light: Off")
-        self.ll_toggle_button.clicked.connect(self.toggle_ll)
-        self.name_button = QPushButton("Name Unidentified")
-        self.name_button.clicked.connect(self.name_person)
-        self.edit_name_button = QPushButton("Edit Name")
-        self.edit_name_button.clicked.connect(self.edit_name)
-        
-        ht_controls_layout.addWidget(self.fr_toggle_button)
-        ht_controls_layout.addWidget(self.ll_toggle_button)
-        ht_controls_layout.addWidget(self.name_button)
-        ht_controls_layout.addWidget(self.edit_name_button)
-
-        self.save_new_face_button = QPushButton("Save New Face")
-        self.save_new_face_button.clicked.connect(self.save_new_face_dialog)
-        ht_controls_layout.addWidget(self.save_new_face_button)
-
-    def on_camera_selection_changed(self, text):
-        """Handle camera selection change"""
-        if "IP Camera" in text:
-            self.ip_input.setPlaceholderText("Enter IP Camera URL (e.g., http://192.168.1.100:8080/video)")
-            self.ip_input.setEnabled(True)
-        elif "Raspberry Pi UDP Stream" in text:
-            self.ip_input.setPlaceholderText("Enter UDP Stream Address (e.g., udp://0.0.0.0:5000)")
-            self.ip_input.setEnabled(True)
-        else:
-            self.ip_input.setEnabled(False)
+        def create_main_layout(self):
+            main_horizontal_layout = QHBoxLayout()
+            self.main_layout.addLayout(main_horizontal_layout)
     
-    def reconnect_camera(self):
-        """Reconnect to the selected camera source"""
-        if self.video_thread:
-            self.video_thread._run = False
-            self.video_thread.quit()
-            self.video_thread.wait()
-        
-        self.start_video_stream()
+            # --- Left Panel ---
+            left_panel = QVBoxLayout()
+            main_horizontal_layout.addLayout(left_panel, 1)
     
-    def setup_camera(self):
-        self.start_video_stream()
-
-    def start_video_stream(self):
-        try:
-            # Determine camera source based on selection
-            current_selection = self.camera_combo.currentData()
+            # Map View (now in external browser)
+            map_group = QGroupBox("Map View (External Browser)")
+            left_panel.addWidget(map_group)
+            map_layout = QVBoxLayout(map_group)
+            # self.map_view = QWebEngineView()
+            # self.map_view.setUrl(QUrl("http://127.0.0.1:5050"))
+            # map_layout.addWidget(self.map_view)
+            map_layout.addWidget(QLabel("Map is running in your external browser."))
+    
+    
+            # Waypoint Deployer
+            waypoint_group = QGroupBox("Mission Waypoints")
+            left_panel.addWidget(waypoint_group)
+            waypoint_layout = QVBoxLayout(waypoint_group)
             
-            if current_selection == "ip":
-                camera_url = self.ip_input.text().strip()
-                if not camera_url:
-                    self.log_message("Please enter IP camera URL first")
-                    return
-                self.log_message(f"Connecting to IP camera: {camera_url}")
-            elif current_selection == "udp_pi":
-                camera_url = self.ip_input.text().strip()
-                if not camera_url:
-                    # Provide a default if user doesn't enter anything for UDP
-                    camera_url = f"udp://0.0.0.0:{UDP_PORT_FOR_PI_STREAM}" # Define UDP_PORT_FOR_PI_STREAM as 5000 earlier
-                    self.log_message(f"Using default Raspberry Pi UDP stream address: {camera_url}")
-                else:
-                    self.log_message(f"Connecting to Raspberry Pi UDP stream: {camera_url}")
+            self.clear_waypoints_button = QPushButton("Clear Map Waypoints")
+            self.clear_waypoints_button.clicked.connect(self.clear_map_waypoints)
+            waypoint_layout.addWidget(self.clear_waypoints_button)
+    
+            # Camera Selection
+            camera_group = QGroupBox("Camera Source")
+            left_panel.addWidget(camera_group)
+            camera_layout = QVBoxLayout(camera_group)
+            
+            self.camera_combo = QComboBox()
+            self.camera_combo.addItem("Default Camera (0)", 0)
+            self.camera_combo.addItem("External Camera (1)", 1)
+            self.camera_combo.addItem("IP Camera (Phone)", "ip")
+            self.camera_combo.addItem("Raspberry Pi TCP Stream", "tcp_pi")
+            camera_layout.addWidget(self.camera_combo)
+            
+            self.ip_input = QLineEdit()
+            self.ip_input.setPlaceholderText("Select a camera source")
+            self.ip_input.setEnabled(False) # Disabled by default
+            camera_layout.addWidget(self.ip_input)
+            
+            self.camera_combo.currentTextChanged.connect(self.on_camera_selection_changed)
+            
+            self.connect_camera_button = QPushButton("Connect Camera")
+            self.connect_camera_button.clicked.connect(self.reconnect_camera)
+            camera_layout.addWidget(self.connect_camera_button)
+    
+            # --- Center Panel: Video Feed ---
+            self.video_label = ClickableVideoLabel("Video feed is disconnected.")
+            self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.video_label.setStyleSheet("background-color: black; color: white;")
+            self.video_label.clicked_coordinates.connect(self.handle_video_click)
+            main_horizontal_layout.addWidget(self.video_label, 3)
+    
+            # --- Right Panel ---
+            right_panel = QVBoxLayout()
+            main_horizontal_layout.addLayout(right_panel, 1)
+    
+            # Drone Status Indicators
+            status_group = QGroupBox("Drone Status")
+            right_panel.addWidget(status_group)
+            status_layout = QHBoxLayout(status_group)
+            self.connection_status_label = QLabel("DISCONNECTED")
+            self.connection_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.connection_status_label.setStyleSheet("background-color: red; color: white; font-weight: bold;")
+            self.armed_status_label = QLabel("DISARMED")
+            self.armed_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.armed_status_label.setStyleSheet("background-color: gray; color: white; font-weight: bold;")
+            status_layout.addWidget(self.connection_status_label)
+            status_layout.addWidget(self.armed_status_label)
+    
+            # Drone Telemetry
+            telemetry_group = QGroupBox("Drone Telemetry")
+            right_panel.addWidget(telemetry_group)
+            telemetry_layout = QVBoxLayout(telemetry_group) # Existing layout for the group
+    
+            # New Horizontal Layout for visual indicators
+            telemetry_visual_layout = QHBoxLayout()
+            telemetry_layout.addLayout(telemetry_visual_layout)
+            
+            telemetry_visual_layout.addWidget(self.attitude_indicator)
+            telemetry_visual_layout.addWidget(self.compass_widget)
+    
+            # Simplified text telemetry dashboard
+            self.telemetry_dashboard = QLabel("Waiting for drone connection...")
+            self.telemetry_dashboard.setAlignment(Qt.AlignmentFlag.AlignTop)
+            telemetry_layout.addWidget(self.telemetry_dashboard) # Keep existing text dashboard below visuals
+    
+            # Human Tracker Info
+            ht_info_group = QGroupBox("Human Tracker Info")
+            right_panel.addWidget(ht_info_group)
+            ht_info_layout = QVBoxLayout(ht_info_group)
+            self.ht_name_label = QLabel("Name: N/A")
+            self.ht_id_label = QLabel("ID: N/A")
+            self.ht_confidence_label = QLabel("Confidence: N/A")
+            self.ht_distance_label = QLabel("Distance: N/A")  # New distance label
+            self.ht_face_image_label = QLabel("No Face")
+            self.ht_face_image_label.setFixedSize(120, 120)
+            self.ht_face_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.fps_label = QLabel("FPS: 0")
+            self.face_count_label = QLabel("Faces: 0") # New label for face count
+            ht_info_layout.addWidget(self.ht_name_label)
+            ht_info_layout.addWidget(self.ht_id_label)
+            ht_info_layout.addWidget(self.ht_confidence_label)
+            ht_info_layout.addWidget(self.ht_distance_label)  # Add distance label
+            ht_info_layout.addWidget(self.ht_face_image_label)
+            ht_info_layout.addWidget(self.fps_label)
+            ht_info_layout.addWidget(self.face_count_label) # Add face count label
+            ht_info_layout.addStretch()
+    
+            # Log and Console Tabs
+            self.log_tabs = QTabWidget()
+            right_panel.addWidget(self.log_tabs)
+    
+            # System Log Tab
+            self.system_log = QTextEdit()
+            self.system_log.setReadOnly(True)
+            self.log_tabs.addTab(self.system_log, "System Logs")
+    
+            # Drone Log Tab
+            self.drone_log = QTextEdit()
+            self.drone_log.setReadOnly(True)
+            self.log_tabs.addTab(self.drone_log, "Drone Logs")
+    
+            # MAVLink Console Tab
+            self.mavlink_console_widget = QWidget()
+            self.log_tabs.addTab(self.mavlink_console_widget, "MAVLink Console")
+            console_layout = QVBoxLayout(self.mavlink_console_widget)
+            self.mavlink_console_output = QTextEdit()
+            self.mavlink_console_output.setReadOnly(True)
+            self.mavlink_console_input = QLineEdit()
+            self.mavlink_console_input.returnPressed.connect(self.send_mavlink_console_command)
+            console_layout.addWidget(self.mavlink_console_output)
+            console_layout.addWidget(self.mavlink_console_input)
+    
+            # --- Bottom Panel: Controls ---
+            bottom_panel = QHBoxLayout()
+            self.main_layout.addLayout(bottom_panel)
+    
+            # Gimbal Controls
+            gimbal_group = QGroupBox("Manual Gimbal Control")
+            bottom_panel.addWidget(gimbal_group)
+            gimbal_layout = QVBoxLayout(gimbal_group)
+            self.gimbal_control = GimbalControl()
+            self.gimbal_control.gimbal_command.connect(self.send_manual_gimbal_command)
+            gimbal_layout.addWidget(self.gimbal_control)
+    
+            # Drone Controls
+            drone_controls_group = QGroupBox("Drone Controls")
+            bottom_panel.addWidget(drone_controls_group)
+            drone_controls_layout = QHBoxLayout(drone_controls_group)
+    
+    
+    
+            arm_button = QPushButton("Arm")
+    
+            arm_button.clicked.connect(self.arm_drone)
+    
+            disarm_button = QPushButton("Disarm")
+    
+            disarm_button.clicked.connect(self.disarm_drone)
+    
+            drone_controls_layout.addWidget(arm_button)
+    
+            drone_controls_layout.addWidget(disarm_button)
+    
+            diagnostics_button = QPushButton("Run Diagnostics")
+            diagnostics_button.clicked.connect(self.run_diagnostics)
+            drone_controls_layout.addWidget(diagnostics_button)
+    
+            flight_mode_box = QComboBox()
+            flight_mode_box.addItems(["Stabilize", "Loiter", "RTL", "Auto"])
+            flight_mode_box.textActivated.connect(self.set_flight_mode)
+            drone_controls_layout.addWidget(flight_mode_box)
+    
+            # Human Tracker Controls
+            ht_controls_group = QGroupBox("Human Tracker Controls")
+            bottom_panel.addWidget(ht_controls_group)
+            ht_controls_layout = QHBoxLayout(ht_controls_group)
+            self.fr_toggle_button = QPushButton("FR: Off")
+            self.fr_toggle_button.clicked.connect(self.toggle_fr)
+            self.ll_toggle_button = QPushButton("Low Light: Off")
+            self.ll_toggle_button.clicked.connect(self.toggle_ll)
+            self.name_button = QPushButton("Name Unidentified")
+            self.name_button.clicked.connect(self.name_person)
+            self.edit_name_button = QPushButton("Edit Name")
+            self.edit_name_button.clicked.connect(self.edit_name)
+            
+            ht_controls_layout.addWidget(self.fr_toggle_button)
+            ht_controls_layout.addWidget(self.ll_toggle_button)
+            ht_controls_layout.addWidget(self.name_button)
+            ht_controls_layout.addWidget(self.edit_name_button)
+    
+            self.save_new_face_button = QPushButton("Save New Face")
+            self.save_new_face_button.clicked.connect(self.save_new_face_dialog)
+            ht_controls_layout.addWidget(self.save_new_face_button)
+    
+        def send_manual_gimbal_command(self, axis, direction):
+            """Sends a manual gimbal command via UDP."""
+            if not self.gimbal_udp_sender:
+                self.log_message("Gimbal UDP sender not initialized.")
+                return
+            self.gimbal_udp_sender.send_manual_command(axis, direction)
+            # self.log_message(f"Sent manual gimbal command: {axis}, {direction}")
+    
+        def on_camera_selection_changed(self, text):
+            """Handle camera selection change"""
+            if "IP Camera" in text:
+                self.ip_input.setPlaceholderText("Enter IP Camera URL (e.g., http://192.168.1.100:8080/video)")
+                self.ip_input.setEnabled(True)
+            elif "Raspberry Pi TCP Stream" in text:
+                self.ip_input.setPlaceholderText(f"Uses Pi IP: {GIMBAL_CONFIG['PI_IP']}")
+                self.ip_input.setEnabled(False)
             else:
-                camera_url = current_selection
-                self.log_message(f"Starting camera {camera_url}...")
+                self.ip_input.clear()
+                self.ip_input.setPlaceholderText("Select a camera source")
+                self.ip_input.setEnabled(False)
+        
+        def reconnect_camera(self):
+            """Reconnect to the selected camera source"""
+            if self.video_thread and self.video_thread.isRunning():
+                self.video_thread.stop()
+                self.video_thread.wait()
             
-            self.video_thread = VideoStreamThread(self.ht_backend, camera_url, self.gimbal_udp_sender, self)
-            self.video_thread.change_pixmap_signal.connect(self.update_image)
-            self.video_thread.update_info_signal.connect(self.update_ht_info_panel)
-            self.video_thread.update_fps_signal.connect(self.update_fps)
-            self.video_thread.face_count_signal.connect(self.update_face_count) # Connect new signal
-            self.video_thread.error_signal.connect(self.log_message)
-            self.video_thread.start()
-            self.log_message("Video stream thread started. Waiting for camera to provide frames...")
-        except Exception as e:
-            self.log_message(f"Error starting video stream: {e}")
-
-    def start_server_task(self):
-        asyncio.ensure_future(self.ws_bridge.start_server())
-
+            self.start_video_stream()
+    
+        def setup_camera(self):
+            self.start_video_stream()
+    
+        def start_video_stream(self):
+            try:
+                # Determine camera source based on selection
+                current_selection = self.camera_combo.currentData()
+                
+                camera_url = None
+                if current_selection == "ip":
+                    camera_url = self.ip_input.text().strip()
+                    if not camera_url:
+                        self.log_message("Please enter IP camera URL first")
+                        return
+                    self.log_message(f"Connecting to IP camera: {camera_url}")
+                elif current_selection == "tcp_pi":
+                    pi_ip = GIMBAL_CONFIG["PI_IP"]
+                    camera_url = f"tcp://{pi_ip}:{UDP_PORT_FOR_PI_STREAM}"
+                    self.log_message(f"Connecting to Raspberry Pi TCP stream: {camera_url}")
+                else:
+                    camera_url = current_selection
+                    self.log_message(f"Starting camera {camera_url}...")
+                
+                if camera_url is None:
+                    self.log_message("Camera source is not valid. Please select a valid source.")
+                    return
+    
+                self.video_thread = VideoStreamThread(self.ht_backend, camera_url, self.gimbal_udp_sender, self)
+                self.video_thread.change_pixmap_signal.connect(self.update_image)
+                self.video_thread.update_info_signal.connect(self.update_ht_info_panel)
+                self.video_thread.update_fps_signal.connect(self.update_fps)
+                self.video_thread.face_count_signal.connect(self.update_face_count) # Connect new signal
+                self.video_thread.error_signal.connect(self.log_message)
+                self.video_thread.start()
+                self.log_message("Video stream thread started. Waiting for camera to provide frames...")
+            except Exception as e:
+                self.log_message(f"Error starting video stream: {e}")
+    
+        def start_server_task(self):
+            asyncio.ensure_future(self.ws_bridge.start_server())
     def queue_ws_message(self, message):
         print(f"[MAIN_GUI] queue_ws_message received: {message.get('type')}")
         self.comm.message_received.emit(message)

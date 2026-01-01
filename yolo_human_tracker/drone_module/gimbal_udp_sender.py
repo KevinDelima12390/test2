@@ -35,6 +35,22 @@ class GimbalUDPSender:
             # print(f"Error sending UDP command: {e}")
             pass
 
+    def send_manual_command(self, axis, direction):
+        """
+        Formats and sends a manual gimbal control command.
+
+        Args:
+            axis (str): The axis to control ('pan' or 'tilt').
+            direction (int): The direction of movement (e.g., 1 for right/up, -1 for left/down).
+        """
+        try:
+            # Format: MAN:axis,direction
+            message = f"MAN:{axis},{direction}"
+            self.sock.sendto(message.encode('utf-8'), (self.target_ip, self.target_port))
+        except Exception as e:
+            # print(f"Error sending manual UDP command: {e}")
+            pass
+
     def close(self):
         """Closes the socket."""
         self.sock.close()
